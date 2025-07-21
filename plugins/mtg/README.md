@@ -101,7 +101,7 @@ The `--gui` flag enables interactive card art selection with a graphical interfa
 - **Navigate with keyboard shortcuts:**
   - Left/Right arrows: Browse printings
   - Enter: Select current version
-  - Escape: Skip card (don't download any version)
+  - Escape: Use first printing (skip manual selection)
 
 The GUI shows a counter (e.g., "3 / 15") indicating which printing you're viewing out of the total available. When you find the desired artwork, click "Select This Version" to download that specific printing for all copies of that card in your deck.
 
