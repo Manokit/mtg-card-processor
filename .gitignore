@@ -14,6 +14,8 @@ game/output/*
 game/decklist/*
 !game/decklist/EMPTY.md
 
+game/*
+
 data
 
 images/*.xcf
