@@ -1,16 +1,17 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import requests
-from PIL import Image, ImageTk, ImageEnhance, ImageOps
+from PIL import Image, ImageTk, ImageEnhance, ImageOps, ImageDraw
 from io import BytesIO
 import time
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict
+from typing import Dict, Tuple, Optional
 import os
 import pickle
 import hashlib
+import numpy as np
 
 class CardSelectorGUI:
     # class-level persistent cache shared across all instances
@@ -50,6 +51,19 @@ class CardSelectorGUI:
         # store original images for adjustment (before processing)
         self.original_image = None
         self.original_image_back = None
+        
+        # selection system for targeted adjustments
+        self.selection_mode = 'none'  # 'none', 'brush', 'color'
+        self.selection_mask = None  # PIL Image mask (same size as card)
+        self.selection_mask_back = None  # mask for back side
+        self.brush_size = 10
+        self.color_tolerance = 30
+        self.is_drawing = False
+        self.last_draw_pos = None
+        
+        # selection overlay canvas
+        self.selection_canvas = None
+        self.selection_canvas_back = None
         
         # ensure cache directory exists only if advanced caching is enabled
         if self.use_caching:
@@ -678,16 +692,94 @@ class CardSelectorGUI:
             # fallback: convert to numpy and back if available, or return original
             return image
         
-    def apply_image_adjustments(self, image: Image.Image) -> Image.Image:
-        """apply all current adjustments to an image"""
+    def create_selection_mask(self, image: Image.Image) -> Image.Image:
+        """create a new empty selection mask for the given image"""
+        return Image.new('L', image.size, 0)  # black = not selected
+        
+    def flood_fill_selection(self, image: Image.Image, x: int, y: int, tolerance: int) -> Image.Image:
+        """create selection mask using flood fill from clicked point"""
+        try:
+            # convert coordinates from display to actual image coordinates
+            img_width, img_height = image.size
+            
+            # ensure click is within bounds
+            if x < 0 or x >= img_width or y < 0 or y >= img_height:
+                return Image.new('L', image.size, 0)
+            
+            # get target color
+            if image.mode != 'RGB':
+                rgb_image = image.convert('RGB')
+            else:
+                rgb_image = image
+                
+            target_color = rgb_image.getpixel((x, y))
+            
+            # create mask using numpy for efficiency
+            img_array = np.array(rgb_image)
+            mask_array = np.zeros((img_height, img_width), dtype=np.uint8)
+            
+            # calculate color difference
+            diff = np.sqrt(np.sum((img_array - target_color) ** 2, axis=2))
+            mask_array[diff <= tolerance] = 255  # white = selected
+            
+            return Image.fromarray(mask_array, mode='L')
+            
+        except Exception as e:
+            print(f"flood fill error: {e}")
+            return Image.new('L', image.size, 0)
+    
+    def apply_selection_to_mask(self, x: int, y: int, is_front: bool = True):
+        """apply brush selection at given coordinates"""
+        try:
+            if is_front and self.selection_mask:
+                mask = self.selection_mask
+            elif not is_front and self.selection_mask_back:
+                mask = self.selection_mask_back
+            else:
+                return
+                
+            # create drawing context
+            draw = ImageDraw.Draw(mask)
+            brush_radius = self.brush_size // 2
+            
+            # draw circle at position
+            draw.ellipse([
+                x - brush_radius, y - brush_radius,
+                x + brush_radius, y + brush_radius
+            ], fill=255)  # white = selected
+            
+            # if we have a last position, draw line between them
+            if self.last_draw_pos:
+                last_x, last_y = self.last_draw_pos
+                draw.line([last_x, last_y, x, y], fill=255, width=self.brush_size)
+                
+            self.last_draw_pos = (x, y)
+            
+        except Exception as e:
+            print(f"brush selection error: {e}")
+            
+    def clear_selection(self):
+        """clear all selections"""
+        if self.original_image:
+            self.selection_mask = self.create_selection_mask(self.original_image)
+        if self.original_image_back:
+            self.selection_mask_back = self.create_selection_mask(self.original_image_back)
+        self.update_selection_display()
+        self.refresh_image_display()
+
+    def apply_image_adjustments(self, image: Image.Image, mask: Image.Image = None) -> Image.Image:
+        """apply all current adjustments to an image, optionally masked"""
         if not image:
             return None
             
         try:
             # start with copy of original and ensure RGB mode
-            adjusted = image.copy()
-            if adjusted.mode != 'RGB':
-                adjusted = adjusted.convert('RGB')
+            original = image.copy()
+            if original.mode != 'RGB':
+                original = original.convert('RGB')
+            
+            # create adjusted version
+            adjusted = original.copy()
             
             # apply gamma correction first (affects overall brightness curve)
             adjusted = self.apply_gamma_correction(adjusted, self.gamma)
@@ -710,11 +802,26 @@ class CardSelectorGUI:
             # apply color balance
             adjusted = self.apply_color_balance(adjusted, self.color_balance)
             
-            return adjusted
+            # if we have a mask, composite adjusted and original based on mask
+            if mask:
+                # mask should be same size as image
+                if mask.size != original.size:
+                    mask = mask.resize(original.size, Image.Resampling.LANCZOS)
+                    
+                # composite: where mask is white (255), use adjusted; where black (0), use original
+                result = Image.composite(adjusted, original, mask)
+                return result
+            else:
+                return adjusted
             
         except Exception as e:
             print(f"error applying image adjustments: {e}")
             return image  # return original if adjustment fails
+            
+    def update_selection_display(self):
+        """update the visual display of selections (overlay on images)"""
+        # this will be implemented after we add the canvas overlays
+        pass
 
     def display_single_card_simple(self, image_url: str):
         """display a single card image with optional simple caching and adjustments"""
@@ -725,8 +832,13 @@ class CardSelectorGUI:
             self.original_image = image.copy()
             self.original_image_back = None
             
-            # apply adjustments
-            adjusted_image = self.apply_image_adjustments(image)
+            # initialize selection mask if needed
+            if self.selection_mask is None:
+                self.selection_mask = self.create_selection_mask(image)
+            
+            # apply adjustments with mask
+            mask_to_use = self.selection_mask if self.selection_mode != 'none' else None
+            adjusted_image = self.apply_image_adjustments(image, mask_to_use)
             adjusted_image.thumbnail((300, 420), Image.Resampling.LANCZOS)
             
             self.photo_image = ImageTk.PhotoImage(adjusted_image)
@@ -769,12 +881,21 @@ class CardSelectorGUI:
             self.original_image = front_image.copy()
             self.original_image_back = back_image.copy()
             
-            # apply adjustments and resize
-            adjusted_front = self.apply_image_adjustments(front_image)
+            # initialize selection masks if needed
+            if self.selection_mask is None:
+                self.selection_mask = self.create_selection_mask(front_image)
+            if self.selection_mask_back is None:
+                self.selection_mask_back = self.create_selection_mask(back_image)
+            
+            # apply adjustments and resize with masks
+            front_mask = self.selection_mask if self.selection_mode != 'none' else None
+            back_mask = self.selection_mask_back if self.selection_mode != 'none' else None
+            
+            adjusted_front = self.apply_image_adjustments(front_image, front_mask)
             adjusted_front.thumbnail((250, 350), Image.Resampling.LANCZOS)
             self.photo_image = ImageTk.PhotoImage(adjusted_front)
             
-            adjusted_back = self.apply_image_adjustments(back_image)
+            adjusted_back = self.apply_image_adjustments(back_image, back_mask)
             adjusted_back.thumbnail((250, 350), Image.Resampling.LANCZOS)
             self.photo_image_back = ImageTk.PhotoImage(adjusted_back)
             
@@ -801,15 +922,18 @@ class CardSelectorGUI:
             self.image_label.configure(text="double-sided images failed to load", image="")
             
     def refresh_image_display(self):
-        """refresh the image display with current adjustments"""
+        """refresh the image display with current adjustments and selections"""
         try:
             if self.original_image and self.original_image_back:
                 # double-sided card
-                adjusted_front = self.apply_image_adjustments(self.original_image)
+                front_mask = self.selection_mask if self.selection_mode != 'none' else None
+                back_mask = self.selection_mask_back if self.selection_mode != 'none' else None
+                
+                adjusted_front = self.apply_image_adjustments(self.original_image, front_mask)
                 adjusted_front.thumbnail((250, 350), Image.Resampling.LANCZOS)
                 self.photo_image = ImageTk.PhotoImage(adjusted_front)
                 
-                adjusted_back = self.apply_image_adjustments(self.original_image_back)  
+                adjusted_back = self.apply_image_adjustments(self.original_image_back, back_mask)  
                 adjusted_back.thumbnail((250, 350), Image.Resampling.LANCZOS)
                 self.photo_image_back = ImageTk.PhotoImage(adjusted_back)
                 
@@ -820,7 +944,8 @@ class CardSelectorGUI:
                     
             elif self.original_image:
                 # single card
-                adjusted_image = self.apply_image_adjustments(self.original_image)
+                mask = self.selection_mask if self.selection_mode != 'none' else None
+                adjusted_image = self.apply_image_adjustments(self.original_image, mask)
                 adjusted_image.thumbnail((300, 420), Image.Resampling.LANCZOS)
                 self.photo_image = ImageTk.PhotoImage(adjusted_image)
                 
@@ -892,6 +1017,11 @@ class CardSelectorGUI:
         # create back image label
         self.image_label_back = ttk.Label(parent, text="loading back image...", anchor="center")
         self.image_label_back.grid(row=2, column=1, padx=(5, 0), pady=(0, 10))
+        
+        # bind mouse events for selection on back image
+        self.image_label_back.bind("<Button-1>", self.on_image_click)
+        self.image_label_back.bind("<B1-Motion>", self.on_image_drag)
+        self.image_label_back.bind("<ButtonRelease-1>", self.on_image_release)
             
     def update_display(self):
         """update the display with current printing info"""
@@ -1028,14 +1158,18 @@ class CardSelectorGUI:
         if self.printings:
             self.selected_printing = self.printings[self.current_index]
             
-            # also store the adjusted images for saving
+            # also store the adjusted images for saving (with selection masks if active)
             if self.original_image and self.original_image_back:
-                # double-sided card - store both adjusted images
-                self.selected_printing['adjusted_front_image'] = self.apply_image_adjustments(self.original_image)
-                self.selected_printing['adjusted_back_image'] = self.apply_image_adjustments(self.original_image_back)
+                # double-sided card - store both adjusted images with masks
+                front_mask = self.selection_mask if self.selection_mode != 'none' else None
+                back_mask = self.selection_mask_back if self.selection_mode != 'none' else None
+                
+                self.selected_printing['adjusted_front_image'] = self.apply_image_adjustments(self.original_image, front_mask)
+                self.selected_printing['adjusted_back_image'] = self.apply_image_adjustments(self.original_image_back, back_mask)
             elif self.original_image:
-                # single card - store adjusted image
-                self.selected_printing['adjusted_image'] = self.apply_image_adjustments(self.original_image)
+                # single card - store adjusted image with mask
+                mask = self.selection_mask if self.selection_mode != 'none' else None
+                self.selected_printing['adjusted_image'] = self.apply_image_adjustments(self.original_image, mask)
                 
         self.close_gui()
         
@@ -1077,86 +1211,220 @@ class CardSelectorGUI:
         """create the adjustment control sliders and buttons"""
         row = 0
         
-        # brightness control
-        ttk.Label(parent, text="Brightness:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
+        # === SELECTION TOOLS SECTION ===
+        selection_frame = ttk.LabelFrame(parent, text="Selection Tools", padding="10")
+        selection_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 20))
+        selection_frame.columnconfigure(0, weight=1)
         row += 1
+        
+        # selection mode radio buttons
+        self.selection_mode_var = tk.StringVar(value='none')
+        
+        none_radio = ttk.Radiobutton(selection_frame, text="No Selection (Adjust All)", 
+                                   variable=self.selection_mode_var, value='none',
+                                   command=self.on_selection_mode_change)
+        none_radio.grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        
+        brush_radio = ttk.Radiobutton(selection_frame, text="Brush Selection", 
+                                    variable=self.selection_mode_var, value='brush',
+                                    command=self.on_selection_mode_change)
+        brush_radio.grid(row=1, column=0, sticky=tk.W, pady=(0, 5))
+        
+        color_radio = ttk.Radiobutton(selection_frame, text="Magic Wand (Color Select)", 
+                                    variable=self.selection_mode_var, value='color',
+                                    command=self.on_selection_mode_change)
+        color_radio.grid(row=2, column=0, sticky=tk.W, pady=(0, 10))
+        
+        # brush size (only visible when brush mode is active)
+        self.brush_size_frame = ttk.Frame(selection_frame)
+        self.brush_size_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        
+        ttk.Label(self.brush_size_frame, text="Brush Size:").grid(row=0, column=0, sticky=tk.W)
+        self.brush_size_var = tk.IntVar(value=self.brush_size)
+        brush_scale = ttk.Scale(self.brush_size_frame, from_=5, to=50, variable=self.brush_size_var, 
+                              orient=tk.HORIZONTAL, length=120, command=self.on_brush_size_change)
+        brush_scale.grid(row=0, column=1, padx=(10, 0))
+        self.brush_size_label = ttk.Label(self.brush_size_frame, text=str(self.brush_size))
+        self.brush_size_label.grid(row=0, column=2, padx=(10, 0))
+        
+        # color tolerance (only visible when color mode is active)
+        self.tolerance_frame = ttk.Frame(selection_frame)
+        self.tolerance_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Label(self.tolerance_frame, text="Color Tolerance:").grid(row=0, column=0, sticky=tk.W)
+        self.tolerance_var = tk.IntVar(value=self.color_tolerance)
+        tolerance_scale = ttk.Scale(self.tolerance_frame, from_=5, to=100, variable=self.tolerance_var, 
+                                  orient=tk.HORIZONTAL, length=120, command=self.on_tolerance_change)
+        tolerance_scale.grid(row=0, column=1, padx=(10, 0))
+        self.tolerance_label = ttk.Label(self.tolerance_frame, text=str(self.color_tolerance))
+        self.tolerance_label.grid(row=0, column=2, padx=(10, 0))
+        
+        # selection control buttons
+        button_frame = ttk.Frame(selection_frame)
+        button_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        
+        clear_sel_button = ttk.Button(button_frame, text="Clear Selection", command=self.clear_selection)
+        clear_sel_button.grid(row=0, column=0, padx=(0, 5))
+        
+        select_all_button = ttk.Button(button_frame, text="Select All", command=self.select_all)
+        select_all_button.grid(row=0, column=1, padx=(0, 5))
+        
+        invert_sel_button = ttk.Button(button_frame, text="Invert", command=self.invert_selection)
+        invert_sel_button.grid(row=0, column=2)
+        
+        # instructions label
+        self.instruction_label = ttk.Label(selection_frame, text="Adjust entire image", 
+                                         font=("Arial", 9), foreground="gray")
+        self.instruction_label.grid(row=6, column=0, sticky=tk.W, pady=(10, 0))
+        
+        # update initial visibility
+        self.update_selection_ui_visibility()
+        
+        # === IMAGE ADJUSTMENTS SECTION ===
+        adj_frame = ttk.LabelFrame(parent, text="Image Adjustments", padding="10")
+        adj_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        adj_frame.columnconfigure(0, weight=1)
+        row += 1
+        
+        adj_row = 0
+        
+        # brightness control
+        ttk.Label(adj_frame, text="Brightness:", font=("Arial", 10, "bold")).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
+        adj_row += 1
         self.brightness_var = tk.DoubleVar(value=self.brightness)
-        brightness_scale = ttk.Scale(parent, from_=0.3, to=2.0, variable=self.brightness_var, 
+        brightness_scale = ttk.Scale(adj_frame, from_=0.3, to=2.0, variable=self.brightness_var, 
                                    orient=tk.HORIZONTAL, length=180,
                                    command=self.on_brightness_change)
-        brightness_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.brightness_value_label = ttk.Label(parent, text=f"{self.brightness:.2f}")
-        self.brightness_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
-        row += 1
+        brightness_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.brightness_value_label = ttk.Label(adj_frame, text=f"{self.brightness:.2f}")
+        self.brightness_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        adj_row += 1
         
         # contrast control  
-        ttk.Label(parent, text="Contrast:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
-        row += 1
+        ttk.Label(adj_frame, text="Contrast:", font=("Arial", 10, "bold")).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
+        adj_row += 1
         self.contrast_var = tk.DoubleVar(value=self.contrast)
-        contrast_scale = ttk.Scale(parent, from_=0.3, to=2.5, variable=self.contrast_var, 
+        contrast_scale = ttk.Scale(adj_frame, from_=0.3, to=2.5, variable=self.contrast_var, 
                                  orient=tk.HORIZONTAL, length=180,
                                  command=self.on_contrast_change)
-        contrast_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.contrast_value_label = ttk.Label(parent, text=f"{self.contrast:.2f}")
-        self.contrast_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
-        row += 1
+        contrast_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.contrast_value_label = ttk.Label(adj_frame, text=f"{self.contrast:.2f}")
+        self.contrast_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        adj_row += 1
         
         # saturation control
-        ttk.Label(parent, text="Saturation:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
-        row += 1
+        ttk.Label(adj_frame, text="Saturation:", font=("Arial", 10, "bold")).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
+        adj_row += 1
         self.saturation_var = tk.DoubleVar(value=self.saturation)
-        saturation_scale = ttk.Scale(parent, from_=0.0, to=2.0, variable=self.saturation_var, 
+        saturation_scale = ttk.Scale(adj_frame, from_=0.0, to=2.0, variable=self.saturation_var, 
                                    orient=tk.HORIZONTAL, length=180,
                                    command=self.on_saturation_change)
-        saturation_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.saturation_value_label = ttk.Label(parent, text=f"{self.saturation:.2f}")
-        self.saturation_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
-        row += 1
+        saturation_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.saturation_value_label = ttk.Label(adj_frame, text=f"{self.saturation:.2f}")
+        self.saturation_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        adj_row += 1
         
         # gamma control
-        ttk.Label(parent, text="Gamma:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
-        row += 1
+        ttk.Label(adj_frame, text="Gamma:", font=("Arial", 10, "bold")).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
+        adj_row += 1
         self.gamma_var = tk.DoubleVar(value=self.gamma)
-        gamma_scale = ttk.Scale(parent, from_=0.3, to=2.5, variable=self.gamma_var, 
+        gamma_scale = ttk.Scale(adj_frame, from_=0.3, to=2.5, variable=self.gamma_var, 
                               orient=tk.HORIZONTAL, length=180,
                               command=self.on_gamma_change)
-        gamma_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.gamma_value_label = ttk.Label(parent, text=f"{self.gamma:.2f}")
-        self.gamma_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
-        row += 1
+        gamma_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.gamma_value_label = ttk.Label(adj_frame, text=f"{self.gamma:.2f}")
+        self.gamma_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        adj_row += 1
         
         # color balance control
-        ttk.Label(parent, text="Color Temperature:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
-        row += 1
-        ttk.Label(parent, text="(Cool ← → Warm)", font=("Arial", 8)).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
-        row += 1
+        ttk.Label(adj_frame, text="Color Temperature:", font=("Arial", 10, "bold")).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
+        adj_row += 1
+        ttk.Label(adj_frame, text="(Cool ← → Warm)", font=("Arial", 8)).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
+        adj_row += 1
         self.color_balance_var = tk.DoubleVar(value=self.color_balance)
-        color_balance_scale = ttk.Scale(parent, from_=-100, to=100, variable=self.color_balance_var, 
+        color_balance_scale = ttk.Scale(adj_frame, from_=-100, to=100, variable=self.color_balance_var, 
                                       orient=tk.HORIZONTAL, length=180,
                                       command=self.on_color_balance_change)
-        color_balance_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.color_balance_value_label = ttk.Label(parent, text=f"{self.color_balance:.0f}")
-        self.color_balance_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
-        row += 1
+        color_balance_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.color_balance_value_label = ttk.Label(adj_frame, text=f"{self.color_balance:.0f}")
+        self.color_balance_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        adj_row += 1
         
         # separator
-        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=20)
-        row += 1
+        ttk.Separator(adj_frame, orient=tk.HORIZONTAL).grid(row=adj_row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=20)
+        adj_row += 1
         
         # reset button
-        reset_button = ttk.Button(parent, text="Reset All", command=self.reset_adjustments)
-        reset_button.grid(row=row, column=0, columnspan=2, pady=(0, 10))
-        row += 1
+        reset_button = ttk.Button(adj_frame, text="Reset All", command=self.reset_adjustments)
+        reset_button.grid(row=adj_row, column=0, columnspan=2, pady=(0, 10))
+        adj_row += 1
         
         # tips label
         tips_text = "Tips for MTG cards:\n• Increase contrast for borders\n• Adjust gamma for text areas\n• Warm colors for older sets\n• Cool colors for modern sets"
-        tips_label = ttk.Label(parent, text=tips_text, font=("Arial", 9), justify=tk.LEFT, 
+        tips_label = ttk.Label(adj_frame, text=tips_text, font=("Arial", 9), justify=tk.LEFT, 
                               foreground="gray", wraplength=200)
-        tips_label.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(20, 0))
+        tips_label.grid(row=adj_row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(20, 0))
         
         # configure column weights  
         parent.columnconfigure(0, weight=1)
         
+    def select_all(self):
+        """select entire image"""
+        if self.original_image:
+            self.selection_mask = Image.new('L', self.original_image.size, 255)  # white = selected
+        if self.original_image_back:
+            self.selection_mask_back = Image.new('L', self.original_image_back.size, 255)
+        self.refresh_image_display()
+        
+    def invert_selection(self):
+        """invert current selection"""
+        try:
+            if self.original_image and self.selection_mask:
+                # invert selection mask (255 - pixel_value)
+                inverted_array = 255 - np.array(self.selection_mask)
+                self.selection_mask = Image.fromarray(inverted_array, mode='L')
+                
+            if self.original_image_back and self.selection_mask_back:
+                inverted_array = 255 - np.array(self.selection_mask_back)
+                self.selection_mask_back = Image.fromarray(inverted_array, mode='L')
+                
+            self.refresh_image_display()
+            
+        except Exception as e:
+            print(f"selection inversion error: {e}")
+        
+    def update_selection_ui_visibility(self):
+        """show/hide selection controls based on current mode"""
+        if hasattr(self, 'brush_size_frame'):
+            if self.selection_mode == 'brush':
+                self.brush_size_frame.grid()
+                self.tolerance_frame.grid_remove()
+                self.instruction_label.configure(text="Click and drag to paint selection")
+            elif self.selection_mode == 'color':
+                self.brush_size_frame.grid_remove()
+                self.tolerance_frame.grid()
+                self.instruction_label.configure(text="Click color to select • Cmd/Ctrl+Click to add • Alt/Shift+Click to subtract")
+            else:
+                self.brush_size_frame.grid_remove()
+                self.tolerance_frame.grid_remove()
+                self.instruction_label.configure(text="Adjust entire image")
+                
+    def on_selection_mode_change(self):
+        """called when selection mode radio button changes"""
+        self.selection_mode = self.selection_mode_var.get()
+        self.update_selection_ui_visibility()
+        print(f"selection mode: {self.selection_mode}")
+        
+    def on_brush_size_change(self, value):
+        """called when brush size slider changes"""
+        self.brush_size = int(float(value))
+        self.brush_size_label.configure(text=str(self.brush_size))
+        
+    def on_tolerance_change(self, value):
+        """called when color tolerance slider changes"""
+        self.color_tolerance = int(float(value))
+        self.tolerance_label.configure(text=str(self.color_tolerance))
+
     def on_brightness_change(self, value):
         """called when brightness slider changes"""
         self.brightness = float(value)
@@ -1186,6 +1454,195 @@ class CardSelectorGUI:
         self.color_balance = float(value)
         self.color_balance_value_label.configure(text=f"{self.color_balance:.0f}")
         self.refresh_image_display()
+        
+    def get_image_coordinates(self, event, is_front=True):
+        """convert screen coordinates to image coordinates"""
+        try:
+            # get current image and its display size
+            if is_front and self.original_image:
+                original_size = self.original_image.size
+                # for single cards, display size is (300, 420) max
+                if self.original_image_back:
+                    display_max = (250, 350)  # double-sided
+                else:
+                    display_max = (300, 420)  # single
+            elif not is_front and self.original_image_back:
+                original_size = self.original_image_back.size
+                display_max = (250, 350)  # back side of double-sided card
+            else:
+                return None, None
+                
+            # calculate actual display size (thumbnail preserves aspect ratio)
+            img_width, img_height = original_size
+            max_width, max_height = display_max
+            
+            # calculate scale factor (same as thumbnail)
+            scale = min(max_width / img_width, max_height / img_height)
+            display_width = int(img_width * scale)
+            display_height = int(img_height * scale)
+            
+            # convert event coordinates to image coordinates
+            # event coordinates are relative to the label widget
+            label_width = event.widget.winfo_width()
+            label_height = event.widget.winfo_height()
+            
+            # center the image within the label
+            x_offset = (label_width - display_width) // 2
+            y_offset = (label_height - display_height) // 2
+            
+            # adjust coordinates
+            img_x = int((event.x - x_offset) / scale)
+            img_y = int((event.y - y_offset) / scale)
+            
+            # clamp to image bounds
+            img_x = max(0, min(img_x, img_width - 1))
+            img_y = max(0, min(img_y, img_height - 1))
+            
+            return img_x, img_y
+            
+        except Exception as e:
+            print(f"coordinate conversion error: {e}")
+            return None, None
+            
+    def combine_masks(self, existing_mask: Image.Image, new_mask: Image.Image) -> Image.Image:
+        """combine two selection masks using OR operation"""
+        try:
+            if existing_mask is None:
+                return new_mask
+            if new_mask is None:
+                return existing_mask
+                
+            # ensure both masks are the same size
+            if existing_mask.size != new_mask.size:
+                new_mask = new_mask.resize(existing_mask.size, Image.Resampling.LANCZOS)
+            
+            # convert to numpy arrays for efficient OR operation
+            existing_array = np.array(existing_mask)
+            new_array = np.array(new_mask)
+            
+            # combine using logical OR (white pixels from either mask)
+            combined_array = np.maximum(existing_array, new_array)
+            
+            return Image.fromarray(combined_array, mode='L')
+            
+        except Exception as e:
+            print(f"mask combination error: {e}")
+            return existing_mask or new_mask
+            
+    def subtract_masks(self, existing_mask: Image.Image, subtract_mask: Image.Image) -> Image.Image:
+        """subtract one selection mask from another"""
+        try:
+            if existing_mask is None or subtract_mask is None:
+                return existing_mask
+                
+            # ensure both masks are the same size
+            if existing_mask.size != subtract_mask.size:
+                subtract_mask = subtract_mask.resize(existing_mask.size, Image.Resampling.LANCZOS)
+            
+            # convert to numpy arrays
+            existing_array = np.array(existing_mask)
+            subtract_array = np.array(subtract_mask)
+            
+            # subtract: where subtract_mask is white, set existing to black
+            result_array = existing_array.copy()
+            result_array[subtract_array > 128] = 0  # where subtract is white, result becomes black
+            
+            return Image.fromarray(result_array, mode='L')
+            
+        except Exception as e:
+            print(f"mask subtraction error: {e}")
+            return existing_mask
+
+    def on_image_click(self, event):
+        """handle mouse click on image"""
+        if self.selection_mode == 'none':
+            return
+            
+        try:
+            # check for modifier keys
+            is_additive = (event.state & 0x8) != 0 or (event.state & 0x4) != 0  # cmd or ctrl  
+            is_subtractive = (event.state & 0x20000) != 0 or (event.state & 0x1) != 0  # alt or shift
+            
+            # determine which image was clicked
+            is_front = (event.widget == self.image_label)
+            img_x, img_y = self.get_image_coordinates(event, is_front)
+            
+            if img_x is None or img_y is None:
+                return
+                
+            modifier_text = ""
+            if is_additive:
+                modifier_text = " (additive)"
+            elif is_subtractive:
+                modifier_text = " (subtractive)"
+            print(f"image click: {img_x}, {img_y} ({'front' if is_front else 'back'}){modifier_text}")
+            
+            if self.selection_mode == 'color':
+                # magic wand color selection
+                if is_front and self.original_image:
+                    new_mask = self.flood_fill_selection(self.original_image, img_x, img_y, self.color_tolerance)
+                    
+                    if is_additive and self.selection_mask:
+                        # combine with existing selection
+                        self.selection_mask = self.combine_masks(self.selection_mask, new_mask)
+                    elif is_subtractive and self.selection_mask:
+                        # subtract from existing selection
+                        self.selection_mask = self.subtract_masks(self.selection_mask, new_mask)
+                    else:
+                        # replace existing selection
+                        self.selection_mask = new_mask
+                        
+                elif not is_front and self.original_image_back:
+                    new_mask = self.flood_fill_selection(self.original_image_back, img_x, img_y, self.color_tolerance)
+                    
+                    if is_additive and self.selection_mask_back:
+                        # combine with existing selection
+                        self.selection_mask_back = self.combine_masks(self.selection_mask_back, new_mask)
+                    elif is_subtractive and self.selection_mask_back:
+                        # subtract from existing selection
+                        self.selection_mask_back = self.subtract_masks(self.selection_mask_back, new_mask)
+                    else:
+                        # replace existing selection
+                        self.selection_mask_back = new_mask
+                    
+                # refresh display immediately
+                self.refresh_image_display()
+                
+            elif self.selection_mode == 'brush':
+                # brush selection (additive behavior is natural with brush)
+                self.is_drawing = True
+                self.last_draw_pos = (img_x, img_y)
+                self.apply_selection_to_mask(img_x, img_y, is_front)
+                self.refresh_image_display()
+                
+        except Exception as e:
+            print(f"image click error: {e}")
+            
+    def on_image_drag(self, event):
+        """handle mouse drag on image"""
+        if self.selection_mode != 'brush' or not self.is_drawing:
+            return
+            
+        try:
+            # determine which image
+            is_front = (event.widget == self.image_label)
+            img_x, img_y = self.get_image_coordinates(event, is_front)
+            
+            if img_x is None or img_y is None:
+                return
+                
+            # continue brush stroke
+            self.apply_selection_to_mask(img_x, img_y, is_front)
+            self.refresh_image_display()
+            
+        except Exception as e:
+            print(f"image drag error: {e}")
+            
+    def on_image_release(self, event):
+        """handle mouse release on image"""
+        if self.selection_mode == 'brush':
+            self.is_drawing = False
+            self.last_draw_pos = None
         
     def save_window_position(self):
         """save current window position for next dialog"""
@@ -1286,6 +1743,11 @@ class CardSelectorGUI:
             # image display (front image goes in column 0)
             self.image_label = ttk.Label(self.image_frame, text="loading image...", anchor="center")
             self.image_label.grid(row=2, column=0, pady=(0, 10))
+            
+            # bind mouse events for selection
+            self.image_label.bind("<Button-1>", self.on_image_click)
+            self.image_label.bind("<B1-Motion>", self.on_image_drag)
+            self.image_label.bind("<ButtonRelease-1>", self.on_image_release)
             
             # navigation buttons frame
             nav_frame = ttk.Frame(card_frame)
