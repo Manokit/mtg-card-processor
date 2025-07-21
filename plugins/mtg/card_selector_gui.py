@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import requests
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageEnhance, ImageOps
 from io import BytesIO
 import time
 import sys
@@ -39,6 +39,17 @@ class CardSelectorGUI:
         
         # simple in-memory cache (just for this session)
         self.simple_image_cache: Dict[str, Image.Image] = {}
+        
+        # image adjustment parameters
+        self.brightness = 1.0
+        self.contrast = 1.0  
+        self.saturation = 1.0
+        self.gamma = 1.0
+        self.color_balance = 0.0  # -100 to +100, negative=cooler, positive=warmer
+        
+        # store original images for adjustment (before processing)
+        self.original_image = None
+        self.original_image_back = None
         
         # ensure cache directory exists only if advanced caching is enabled
         if self.use_caching:
@@ -614,14 +625,111 @@ class CardSelectorGUI:
             self.simple_image_cache[image_url] = image.copy()
             
         return image
+        
+    def apply_color_balance(self, image: Image.Image, balance: float) -> Image.Image:
+        """apply color temperature adjustment (-100 to +100)"""
+        if abs(balance) < 0.01:  # skip if no adjustment needed
+            return image
+            
+        try:
+            # convert to rgb if needed
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+                
+            # create color adjustment - negative = cooler (more blue), positive = warmer (more red/yellow) 
+            if balance < 0:  # cooler
+                # add blue, reduce red/yellow
+                adjustment = abs(balance) / 100.0 * 0.3  # limit max adjustment
+                # multiply red and green channels by (1-adjustment), keep blue
+                r, g, b = image.split()
+                r = r.point(lambda x: int(x * (1 - adjustment)))
+                g = g.point(lambda x: int(x * (1 - adjustment * 0.5)))  # less green reduction
+                image = Image.merge('RGB', (r, g, b))
+            else:  # warmer
+                # add red/yellow, reduce blue
+                adjustment = balance / 100.0 * 0.3
+                r, g, b = image.split()
+                b = b.point(lambda x: int(x * (1 - adjustment)))
+                g = g.point(lambda x: int(x * (1 - adjustment * 0.3)))  # slight green reduction
+                image = Image.merge('RGB', (r, g, b))
+                
+            return image
+        except Exception as e:
+            print(f"color balance error: {e}")
+            return image
+        
+    def apply_gamma_correction(self, image: Image.Image, gamma: float) -> Image.Image:
+        """apply gamma correction"""
+        if abs(gamma - 1.0) < 0.01:  # skip if no adjustment needed
+            return image
+            
+        # ensure image is in rgb mode for consistent processing
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+            
+        # build lookup table for gamma correction (for 8-bit values)
+        gamma_table = [int(((i / 255.0) ** (1.0 / gamma)) * 255) for i in range(256)]
+        
+        # apply gamma correction
+        try:
+            return image.point(gamma_table * 3)  # multiply by 3 for r, g, b channels
+        except Exception as e:
+            print(f"gamma correction fallback: {e}")
+            # fallback: convert to numpy and back if available, or return original
+            return image
+        
+    def apply_image_adjustments(self, image: Image.Image) -> Image.Image:
+        """apply all current adjustments to an image"""
+        if not image:
+            return None
+            
+        try:
+            # start with copy of original and ensure RGB mode
+            adjusted = image.copy()
+            if adjusted.mode != 'RGB':
+                adjusted = adjusted.convert('RGB')
+            
+            # apply gamma correction first (affects overall brightness curve)
+            adjusted = self.apply_gamma_correction(adjusted, self.gamma)
+            
+            # apply brightness
+            if abs(self.brightness - 1.0) > 0.01:
+                enhancer = ImageEnhance.Brightness(adjusted)
+                adjusted = enhancer.enhance(self.brightness)
+                
+            # apply contrast  
+            if abs(self.contrast - 1.0) > 0.01:
+                enhancer = ImageEnhance.Contrast(adjusted)
+                adjusted = enhancer.enhance(self.contrast)
+                
+            # apply saturation
+            if abs(self.saturation - 1.0) > 0.01:
+                enhancer = ImageEnhance.Color(adjusted)
+                adjusted = enhancer.enhance(self.saturation)
+                
+            # apply color balance
+            adjusted = self.apply_color_balance(adjusted, self.color_balance)
+            
+            return adjusted
+            
+        except Exception as e:
+            print(f"error applying image adjustments: {e}")
+            return image  # return original if adjustment fails
 
     def display_single_card_simple(self, image_url: str):
-        """display a single card image with optional simple caching"""
+        """display a single card image with optional simple caching and adjustments"""
         try:
             image = self.get_image_with_simple_cache(image_url)
-            image.thumbnail((300, 420), Image.Resampling.LANCZOS)
             
-            self.photo_image = ImageTk.PhotoImage(image)
+            # store original for adjustments
+            self.original_image = image.copy()
+            self.original_image_back = None
+            
+            # apply adjustments
+            adjusted_image = self.apply_image_adjustments(image)
+            adjusted_image.thumbnail((300, 420), Image.Resampling.LANCZOS)
+            
+            self.photo_image = ImageTk.PhotoImage(adjusted_image)
             
             # clear any back image and hide back label
             self.photo_image_back = None
@@ -639,7 +747,7 @@ class CardSelectorGUI:
             self.image_label.configure(text="image failed to load", image="")
             
     def display_double_sided_simple(self, card_faces: list):
-        """display both sides of a double-sided card with optional simple caching"""
+        """display both sides of a double-sided card with optional simple caching and adjustments"""
         try:
             front_face = card_faces[0]
             back_face = card_faces[1]
@@ -655,13 +763,20 @@ class CardSelectorGUI:
             
             # load front image with simple caching
             front_image = self.get_image_with_simple_cache(front_image_uris['normal'])
-            front_image.thumbnail((250, 350), Image.Resampling.LANCZOS)
-            self.photo_image = ImageTk.PhotoImage(front_image)
-            
-            # load back image with simple caching
             back_image = self.get_image_with_simple_cache(back_image_uris['normal'])
-            back_image.thumbnail((250, 350), Image.Resampling.LANCZOS)
-            self.photo_image_back = ImageTk.PhotoImage(back_image)
+            
+            # store originals for adjustments
+            self.original_image = front_image.copy()
+            self.original_image_back = back_image.copy()
+            
+            # apply adjustments and resize
+            adjusted_front = self.apply_image_adjustments(front_image)
+            adjusted_front.thumbnail((250, 350), Image.Resampling.LANCZOS)
+            self.photo_image = ImageTk.PhotoImage(adjusted_front)
+            
+            adjusted_back = self.apply_image_adjustments(back_image)
+            adjusted_back.thumbnail((250, 350), Image.Resampling.LANCZOS)
+            self.photo_image_back = ImageTk.PhotoImage(adjusted_back)
             
             # update labels
             self.image_label.configure(image=self.photo_image, text="")
@@ -684,6 +799,59 @@ class CardSelectorGUI:
         except Exception as e:
             print(f"error loading double-sided images: {e}")
             self.image_label.configure(text="double-sided images failed to load", image="")
+            
+    def refresh_image_display(self):
+        """refresh the image display with current adjustments"""
+        try:
+            if self.original_image and self.original_image_back:
+                # double-sided card
+                adjusted_front = self.apply_image_adjustments(self.original_image)
+                adjusted_front.thumbnail((250, 350), Image.Resampling.LANCZOS)
+                self.photo_image = ImageTk.PhotoImage(adjusted_front)
+                
+                adjusted_back = self.apply_image_adjustments(self.original_image_back)  
+                adjusted_back.thumbnail((250, 350), Image.Resampling.LANCZOS)
+                self.photo_image_back = ImageTk.PhotoImage(adjusted_back)
+                
+                # update display
+                self.image_label.configure(image=self.photo_image)
+                if hasattr(self, 'image_label_back'):
+                    self.image_label_back.configure(image=self.photo_image_back)
+                    
+            elif self.original_image:
+                # single card
+                adjusted_image = self.apply_image_adjustments(self.original_image)
+                adjusted_image.thumbnail((300, 420), Image.Resampling.LANCZOS)
+                self.photo_image = ImageTk.PhotoImage(adjusted_image)
+                
+                # update display
+                self.image_label.configure(image=self.photo_image)
+                
+        except Exception as e:
+            print(f"error refreshing image display: {e}")
+            
+    def reset_adjustments(self):
+        """reset all adjustments to default values"""
+        self.brightness = 1.0
+        self.contrast = 1.0
+        self.saturation = 1.0
+        self.gamma = 1.0
+        self.color_balance = 0.0
+        
+        # update sliders if they exist
+        if hasattr(self, 'brightness_var'):
+            self.brightness_var.set(self.brightness)
+        if hasattr(self, 'contrast_var'):
+            self.contrast_var.set(self.contrast)
+        if hasattr(self, 'saturation_var'):
+            self.saturation_var.set(self.saturation)
+        if hasattr(self, 'gamma_var'):
+            self.gamma_var.set(self.gamma)
+        if hasattr(self, 'color_balance_var'):
+            self.color_balance_var.set(self.color_balance)
+            
+        # refresh display
+        self.refresh_image_display()
             
     def update_card_info_display(self, printing: dict):
         """update just the card info section"""
@@ -859,13 +1027,24 @@ class CardSelectorGUI:
         """select current printing and close window"""
         if self.printings:
             self.selected_printing = self.printings[self.current_index]
+            
+            # also store the adjusted images for saving
+            if self.original_image and self.original_image_back:
+                # double-sided card - store both adjusted images
+                self.selected_printing['adjusted_front_image'] = self.apply_image_adjustments(self.original_image)
+                self.selected_printing['adjusted_back_image'] = self.apply_image_adjustments(self.original_image_back)
+            elif self.original_image:
+                # single card - store adjusted image
+                self.selected_printing['adjusted_image'] = self.apply_image_adjustments(self.original_image)
+                
         self.close_gui()
         
     def skip_card(self):
         """use first available printing (skip manual selection)"""
         if self.printings:
             self.selected_printing = self.printings[0]
-            print(f"using first available printing for card")
+            # no adjustments when skipping - use original scryfall images
+            print(f"using first available printing for card (no adjustments)")
         else:
             self.selected_printing = None
         self.close_gui()
@@ -893,6 +1072,120 @@ class CardSelectorGUI:
             
         # clear per-dialog state (but keep global image cache for next time!)
         self.loading_status.clear()
+        
+    def create_adjustment_controls(self, parent):
+        """create the adjustment control sliders and buttons"""
+        row = 0
+        
+        # brightness control
+        ttk.Label(parent, text="Brightness:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
+        row += 1
+        self.brightness_var = tk.DoubleVar(value=self.brightness)
+        brightness_scale = ttk.Scale(parent, from_=0.3, to=2.0, variable=self.brightness_var, 
+                                   orient=tk.HORIZONTAL, length=180,
+                                   command=self.on_brightness_change)
+        brightness_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.brightness_value_label = ttk.Label(parent, text=f"{self.brightness:.2f}")
+        self.brightness_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
+        row += 1
+        
+        # contrast control  
+        ttk.Label(parent, text="Contrast:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
+        row += 1
+        self.contrast_var = tk.DoubleVar(value=self.contrast)
+        contrast_scale = ttk.Scale(parent, from_=0.3, to=2.5, variable=self.contrast_var, 
+                                 orient=tk.HORIZONTAL, length=180,
+                                 command=self.on_contrast_change)
+        contrast_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.contrast_value_label = ttk.Label(parent, text=f"{self.contrast:.2f}")
+        self.contrast_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
+        row += 1
+        
+        # saturation control
+        ttk.Label(parent, text="Saturation:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
+        row += 1
+        self.saturation_var = tk.DoubleVar(value=self.saturation)
+        saturation_scale = ttk.Scale(parent, from_=0.0, to=2.0, variable=self.saturation_var, 
+                                   orient=tk.HORIZONTAL, length=180,
+                                   command=self.on_saturation_change)
+        saturation_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.saturation_value_label = ttk.Label(parent, text=f"{self.saturation:.2f}")
+        self.saturation_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
+        row += 1
+        
+        # gamma control
+        ttk.Label(parent, text="Gamma:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
+        row += 1
+        self.gamma_var = tk.DoubleVar(value=self.gamma)
+        gamma_scale = ttk.Scale(parent, from_=0.3, to=2.5, variable=self.gamma_var, 
+                              orient=tk.HORIZONTAL, length=180,
+                              command=self.on_gamma_change)
+        gamma_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.gamma_value_label = ttk.Label(parent, text=f"{self.gamma:.2f}")
+        self.gamma_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
+        row += 1
+        
+        # color balance control
+        ttk.Label(parent, text="Color Temperature:", font=("Arial", 10, "bold")).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
+        row += 1
+        ttk.Label(parent, text="(Cool ← → Warm)", font=("Arial", 8)).grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
+        row += 1
+        self.color_balance_var = tk.DoubleVar(value=self.color_balance)
+        color_balance_scale = ttk.Scale(parent, from_=-100, to=100, variable=self.color_balance_var, 
+                                      orient=tk.HORIZONTAL, length=180,
+                                      command=self.on_color_balance_change)
+        color_balance_scale.grid(row=row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.color_balance_value_label = ttk.Label(parent, text=f"{self.color_balance:.0f}")
+        self.color_balance_value_label.grid(row=row, column=1, padx=(10, 0), pady=(0, 10))
+        row += 1
+        
+        # separator
+        ttk.Separator(parent, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=20)
+        row += 1
+        
+        # reset button
+        reset_button = ttk.Button(parent, text="Reset All", command=self.reset_adjustments)
+        reset_button.grid(row=row, column=0, columnspan=2, pady=(0, 10))
+        row += 1
+        
+        # tips label
+        tips_text = "Tips for MTG cards:\n• Increase contrast for borders\n• Adjust gamma for text areas\n• Warm colors for older sets\n• Cool colors for modern sets"
+        tips_label = ttk.Label(parent, text=tips_text, font=("Arial", 9), justify=tk.LEFT, 
+                              foreground="gray", wraplength=200)
+        tips_label.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(20, 0))
+        
+        # configure column weights  
+        parent.columnconfigure(0, weight=1)
+        
+    def on_brightness_change(self, value):
+        """called when brightness slider changes"""
+        self.brightness = float(value)
+        self.brightness_value_label.configure(text=f"{self.brightness:.2f}")
+        self.refresh_image_display()
+        
+    def on_contrast_change(self, value):
+        """called when contrast slider changes"""
+        self.contrast = float(value)
+        self.contrast_value_label.configure(text=f"{self.contrast:.2f}")
+        self.refresh_image_display()
+        
+    def on_saturation_change(self, value):
+        """called when saturation slider changes"""
+        self.saturation = float(value)
+        self.saturation_value_label.configure(text=f"{self.saturation:.2f}")
+        self.refresh_image_display()
+        
+    def on_gamma_change(self, value):
+        """called when gamma slider changes"""
+        self.gamma = float(value)
+        self.gamma_value_label.configure(text=f"{self.gamma:.2f}")
+        self.refresh_image_display()
+        
+    def on_color_balance_change(self, value):
+        """called when color balance slider changes"""
+        self.color_balance = float(value)
+        self.color_balance_value_label.configure(text=f"{self.color_balance:.0f}")
+        self.refresh_image_display()
         
     def save_window_position(self):
         """save current window position for next dialog"""
@@ -926,11 +1219,11 @@ class CardSelectorGUI:
             self.executor = ThreadPoolExecutor(max_workers=3)
             
             print("creating tkinter window...")
-            # create main window - wider to accommodate double-sided cards
+            # create main window - wider to accommodate double-sided cards + adjustment controls
             self.root = tk.Tk()
             self.root.title(f"Select Card Art - {card_name}")
-            self.root.geometry("750x750")
-            self.root.resizable(False, False)
+            self.root.geometry("1000x800")  # wider for adjustment controls
+            self.root.resizable(True, True)
             
             # restore window position if we have one saved, but validate it's on-screen
             if self.window_x is not None and self.window_y is not None:
@@ -939,19 +1232,19 @@ class CardSelectorGUI:
                 screen_height = self.root.winfo_screenheight()
                 
                 # clamp position to screen bounds
-                safe_x = max(0, min(self.window_x, screen_width - 750))
-                safe_y = max(0, min(self.window_y, screen_height - 750))
+                safe_x = max(0, min(self.window_x, screen_width - 1000))
+                safe_y = max(0, min(self.window_y, screen_height - 800))
                 
                 print(f"restoring window position: {safe_x},{safe_y}")
-                self.root.geometry(f"750x750+{safe_x}+{safe_y}")
+                self.root.geometry(f"1000x800+{safe_x}+{safe_y}")
             else:
                 # center window on screen
                 screen_width = self.root.winfo_screenwidth()
                 screen_height = self.root.winfo_screenheight()
-                center_x = (screen_width - 750) // 2
-                center_y = (screen_height - 750) // 2
+                center_x = (screen_width - 1000) // 2
+                center_y = (screen_height - 800) // 2
                 print(f"centering window at: {center_x},{center_y}")
-                self.root.geometry(f"750x750+{center_x}+{center_y}")
+                self.root.geometry(f"1000x800+{center_x}+{center_y}")
             
             # force window to front and focus
             self.root.lift()
@@ -960,20 +1253,32 @@ class CardSelectorGUI:
             self.root.focus_force()
             
             print("creating gui elements...")
-            # main frame
-            main_frame = ttk.Frame(self.root, padding="10")
-            main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            # main container with two columns: left for card display, right for controls
+            main_container = ttk.Frame(self.root, padding="10")
+            main_container.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            main_container.columnconfigure(0, weight=2)  # card area gets more space
+            main_container.columnconfigure(1, weight=1)  # controls area
+            main_container.rowconfigure(0, weight=1)
             
+            # left frame for card display
+            card_frame = ttk.Frame(main_container)
+            card_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 10))
+            
+            # right frame for adjustment controls  
+            controls_frame = ttk.LabelFrame(main_container, text="Image Adjustments", padding="10")
+            controls_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S))
+            
+            # === CARD DISPLAY AREA ===
             # card name label
-            name_label = ttk.Label(main_frame, text=card_name, font=("Arial", 16, "bold"))
+            name_label = ttk.Label(card_frame, text=card_name, font=("Arial", 16, "bold"))
             name_label.grid(row=0, column=0, columnspan=3, pady=(0, 10))
             
             # counter label
-            self.counter_label = ttk.Label(main_frame, text="", font=("Arial", 12))
+            self.counter_label = ttk.Label(card_frame, text="", font=("Arial", 12))
             self.counter_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
             
             # create image container frame to support side-by-side layout
-            self.image_frame = ttk.Frame(main_frame)
+            self.image_frame = ttk.Frame(card_frame)
             self.image_frame.grid(row=2, column=0, columnspan=3, pady=(0, 10))
             self.image_frame.columnconfigure(0, weight=1)
             self.image_frame.columnconfigure(1, weight=1)
@@ -983,7 +1288,7 @@ class CardSelectorGUI:
             self.image_label.grid(row=2, column=0, pady=(0, 10))
             
             # navigation buttons frame
-            nav_frame = ttk.Frame(main_frame)
+            nav_frame = ttk.Frame(card_frame)
             nav_frame.grid(row=3, column=0, columnspan=3, pady=(0, 10))
             
             prev_button = ttk.Button(nav_frame, text="◀ Previous", command=self.previous_card)
@@ -993,11 +1298,11 @@ class CardSelectorGUI:
             next_button.pack(side=tk.LEFT)
             
             # card info label
-            self.info_label = ttk.Label(main_frame, text="", justify=tk.LEFT, font=("Arial", 10))
+            self.info_label = ttk.Label(card_frame, text="", justify=tk.LEFT, font=("Arial", 10))
             self.info_label.grid(row=4, column=0, columnspan=3, pady=(0, 10), sticky=(tk.W, tk.E))
             
             # action buttons frame
-            button_frame = ttk.Frame(main_frame)
+            button_frame = ttk.Frame(card_frame)
             button_frame.grid(row=5, column=0, columnspan=3, pady=(10, 0))
             
             select_button = ttk.Button(button_frame, text="Select This Version", command=self.select_card)
@@ -1005,6 +1310,9 @@ class CardSelectorGUI:
             
             skip_button = ttk.Button(button_frame, text="Use First Printing", command=self.skip_card)
             skip_button.pack(side=tk.LEFT)
+            
+            # === ADJUSTMENT CONTROLS ===
+            self.create_adjustment_controls(controls_frame)
             
             # keyboard bindings
             self.root.bind('<Left>', lambda e: self.previous_card())
@@ -1015,7 +1323,7 @@ class CardSelectorGUI:
             # configure grid weights
             self.root.columnconfigure(0, weight=1)
             self.root.rowconfigure(0, weight=1)
-            main_frame.columnconfigure(0, weight=1)
+            card_frame.columnconfigure(0, weight=1)
             
             # initial display and start background loading
             if self.printings:
