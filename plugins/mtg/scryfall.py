@@ -266,15 +266,30 @@ def fetch_card_with_gui(
         # get all available printings
         prints_search_json = request_scryfall(card_json['prints_search_uri']).json()
         card_printings = prints_search_json['data']
+        print(f'found {len(card_printings)} total printings for "{name}"')
 
         # filter out digital-only and invalid printings
         valid_printings = []
         for printing in card_printings:
-            # skip if no image available
-            if 'image_uris' not in printing or 'normal' not in printing['image_uris']:
+            # check for images - they can be on the main card or on card faces for double-sided cards
+            has_image = False
+            
+            if 'image_uris' in printing and 'normal' in printing['image_uris']:
+                has_image = True
+            elif 'card_faces' in printing:
+                # check if any face has an image
+                for face in printing['card_faces']:
+                    if 'image_uris' in face and 'normal' in face['image_uris']:
+                        has_image = True
+                        break
+            
+            if not has_image:
                 continue
+                
             valid_printings.append(printing)
 
+        print(f'found {len(valid_printings)} valid printings after filtering')
+        
         if not valid_printings:
             print(f'no valid printings found for "{name}"')
             return False

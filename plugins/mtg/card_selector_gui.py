@@ -83,10 +83,21 @@ class CardSelectorGUI:
             
         self.info_label.configure(text=info_text)
         
-        # load and display image
+        # load and display image - handle both regular and double-sided cards
+        image_url = None
+        
+        # check main card for image first
         image_uris = printing.get('image_uris', {})
         if 'normal' in image_uris:
-            self.load_and_display_image(image_uris['normal'])
+            image_url = image_uris['normal']
+        # if no main image, check card faces for double-sided cards
+        elif 'card_faces' in printing and len(printing['card_faces']) > 0:
+            first_face = printing['card_faces'][0]
+            if 'image_uris' in first_face and 'normal' in first_face['image_uris']:
+                image_url = first_face['image_uris']['normal']
+        
+        if image_url:
+            self.load_and_display_image(image_url)
         else:
             self.image_label.configure(text="no image available", image="")
             
