@@ -32,6 +32,20 @@ def cli(
         print(f'{deck_path} is not a valid file.')
         return
 
+    # extract deck name from file path and create subfolder
+    deck_filename = os.path.basename(deck_path)
+    deck_name = os.path.splitext(deck_filename)[0]  # remove file extension
+    
+    # create deck-specific directories
+    deck_front_directory = os.path.join(front_directory, deck_name)
+    deck_double_sided_directory = os.path.join(double_sided_directory, deck_name)
+    
+    # ensure directories exist
+    os.makedirs(deck_front_directory, exist_ok=True)
+    os.makedirs(deck_double_sided_directory, exist_ok=True)
+    
+    print(f'Fetching cards for deck "{deck_name}" into: {deck_front_directory}')
+
     with open(deck_path, 'r') as deck_file:
         deck_text = deck_file.read()
 
@@ -47,8 +61,8 @@ def cli(
                 prefer_showcase,
                 prefer_extra_art,
 
-                front_directory,
-                double_sided_directory
+                deck_front_directory,
+                deck_double_sided_directory
             )
         )
 
