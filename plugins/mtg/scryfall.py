@@ -335,7 +335,8 @@ def get_handle_card(
         
         def configured_fetch_card_gui(index: int, name: str, card_set: str = None, card_collector_number: int = None, quantity: int = 1):
             # create fresh gui instance for each card to avoid tkinter issues
-            gui = CardSelectorGUI()
+            # use simple caching for speed without complexity
+            gui = CardSelectorGUI(use_caching=False, simple_cache=True)
             
             # restore window position from previous card
             if shared_position['x'] is not None:
