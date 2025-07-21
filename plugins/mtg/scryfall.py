@@ -3,6 +3,7 @@ from typing import List, Set, Tuple, Optional
 import re
 import requests
 import time
+from urllib.parse import quote
 from card_selector_gui import CardSelectorGUI
 
 double_sided_layouts = ['transform', 'modal_dfc']
@@ -59,6 +60,12 @@ def fetch_card_art(
 
 def remove_nonalphanumeric(s: str) -> str:
     return re.sub(r'[^\w]', '', s)
+
+def extract_front_face_name(card_name: str) -> str:
+    """extract front face name from double-sided cards (split on //)"""
+    if '//' in card_name:
+        return card_name.split('//')[0].strip()
+    return card_name
 
 def partition_printings(printings: List, condition: List) -> Tuple[List, List]:
     matches = []
@@ -118,13 +125,34 @@ def fetch_card(
         if name == "":
             raise Exception()
 
-        # Filter out symbols from card names
-        clear_card_name = remove_nonalphanumeric(name)
+        # Filter out symbols from card names - use front face name for double-sided cards  
+        front_face_name = extract_front_face_name(name)
 
-        card_info_query = f'https://api.scryfall.com/cards/named?exact={clear_card_name}'
+        # debug output for double-sided cards
+        if '//' in name:
+            print(f'double-sided card detected: "{name}" -> searching for: "{front_face_name}"')
+
+        # url encode the name for api search
+        encoded_name = quote(front_face_name)
+        card_info_query = f'https://api.scryfall.com/cards/named?exact={encoded_name}'
 
         # Query for card info
-        card_json = request_scryfall(card_info_query).json()
+        try:
+            card_json = request_scryfall(card_info_query).json()
+        except Exception as e:
+            # if exact search fails and this is a double-sided card, try fuzzy search
+            if '//' in name:
+                print(f'exact search failed for double-sided card, trying fuzzy search...')
+                fuzzy_query = f'https://api.scryfall.com/cards/named?fuzzy={encoded_name}'
+                try:
+                    print(f'fuzzy searching scryfall for: {fuzzy_query}')
+                    card_json = request_scryfall(fuzzy_query).json()
+                except Exception as e2:
+                    print(f'fuzzy search also failed for "{front_face_name}": {e2}')
+                    raise e2
+            else:
+                print(f'failed to find card "{front_face_name}": {e}')
+                raise e
 
         set = card_json["set"]
         collector_number = card_json["collector_number"]
@@ -159,7 +187,8 @@ def fetch_card(
                 set = best_print["set"]
                 collector_number = best_print["collector_number"]
 
-        # Fetch card art
+        # Fetch card art - use cleaned name for file naming
+        clear_card_name = remove_nonalphanumeric(card_json['name'])
         fetch_card_art(
             index,
             quantity,
@@ -203,15 +232,36 @@ def fetch_card_with_gui(
         if name == "":
             return False
 
-        # get card info and all printings
-        clear_card_name = remove_nonalphanumeric(name)
-        card_info_query = f'https://api.scryfall.com/cards/named?exact={clear_card_name}'
+        # get card info and all printings - use front face name for double-sided cards
+        front_face_name = extract_front_face_name(name)
+        
+        # debug output for double-sided cards
+        if '//' in name:
+            print(f'double-sided card detected: "{name}" -> searching for: "{front_face_name}"')
+        
+        # try exact search first, then fuzzy search for double-sided cards
+        encoded_name = quote(front_face_name)
+        card_info_query = f'https://api.scryfall.com/cards/named?exact={encoded_name}'
         
         try:
+            print(f'searching scryfall for: {card_info_query}')
             card_json = request_scryfall(card_info_query).json()
         except Exception as e:
-            print(f'failed to find card "{name}": {e}')
-            return False
+            # if exact search fails and this is a double-sided card, try fuzzy search
+            if '//' in name:
+                print(f'exact search failed for double-sided card, trying fuzzy search...')
+                fuzzy_query = f'https://api.scryfall.com/cards/named?fuzzy={encoded_name}'
+                try:
+                    print(f'fuzzy searching scryfall for: {fuzzy_query}')
+                    card_json = request_scryfall(fuzzy_query).json()
+                except Exception as e2:
+                    print(f'fuzzy search also failed for "{front_face_name}": {e2}')
+                    print(f'original card name was: "{name}"')
+                    return False
+            else:
+                print(f'failed to find card "{front_face_name}": {e}')
+                print(f'original card name was: "{name}"')
+                return False
 
         # get all available printings
         prints_search_json = request_scryfall(card_json['prints_search_uri']).json()
@@ -229,7 +279,7 @@ def fetch_card_with_gui(
             print(f'no valid printings found for "{name}"')
             return False
 
-        # show gui selection dialog
+        # show gui selection dialog (use original name for display)
         selected_printing = gui.show_selection_dialog(name, valid_printings)
         
         if selected_printing is None:
@@ -237,10 +287,12 @@ def fetch_card_with_gui(
             return False
 
         # fetch the selected card art
+        # use the actual card name from scryfall for file naming
+        actual_card_name = remove_nonalphanumeric(selected_printing['name'])
         fetch_card_art(
             index,
             quantity,
-            clear_card_name,
+            actual_card_name,
             selected_printing['set'],
             selected_printing['collector_number'],
             selected_printing['layout'],

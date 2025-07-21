@@ -13,6 +13,8 @@ class CardSelectorGUI:
         self.current_index = 0
         self.printings = []
         self.photo_image = None
+        self.window_x = None
+        self.window_y = None
         
     def request_scryfall_image(self, image_url: str) -> bytes:
         """fetch image from scryfall with proper rate limiting"""
@@ -104,14 +106,29 @@ class CardSelectorGUI:
         """select current printing and close window"""
         if self.printings:
             self.selected_printing = self.printings[self.current_index]
+        self.save_window_position()
         self.root.quit()
         self.root.destroy()
         
     def skip_card(self):
         """skip this card (don't download any version)"""
         self.selected_printing = None
+        self.save_window_position()
         self.root.quit() 
         self.root.destroy()
+        
+    def save_window_position(self):
+        """save current window position for next dialog"""
+        if self.root:
+            # get window position (x, y coordinates)
+            self.root.update_idletasks()  # ensure geometry is updated
+            geometry = self.root.geometry()
+            # geometry format is "WIDTHxHEIGHT+X+Y"
+            if '+' in geometry:
+                parts = geometry.split('+')
+                if len(parts) >= 3:
+                    self.window_x = int(parts[1])
+                    self.window_y = int(parts[2])
         
     def show_selection_dialog(self, card_name: str, printings: list) -> dict:
         """show gui for selecting card printing, returns selected printing or none"""
@@ -125,6 +142,10 @@ class CardSelectorGUI:
             self.root.title(f"Select Card Art - {card_name}")
             self.root.geometry("500x700")
             self.root.resizable(False, False)
+            
+            # restore window position if we have one saved
+            if self.window_x is not None and self.window_y is not None:
+                self.root.geometry(f"500x700+{self.window_x}+{self.window_y}")
             
             # main frame
             main_frame = ttk.Frame(self.root, padding="10")
