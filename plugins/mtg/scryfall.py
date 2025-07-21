@@ -31,32 +31,58 @@ def fetch_card_art(
     layout: str,
 
     front_img_dir: str,
-    double_sided_dir: str
+    double_sided_dir: str,
+    adjusted_images: dict = None
 ) -> None:
-    # Query for the front side
-    card_front_image_query = f'https://api.scryfall.com/cards/{card_set}/{card_collector_number}/?format=image&version=png'
-    card_art = request_scryfall(card_front_image_query).content
-    if card_art is not None:
-
-        # Save image based on quantity
+    from PIL import Image
+    
+    if adjusted_images and 'adjusted_image' in adjusted_images:
+        # single card with adjustments - use adjusted image
+        adjusted_image = adjusted_images['adjusted_image']
         for counter in range(quantity):
             image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
-
-            with open(image_path, 'wb') as f:
-                f.write(card_art)
-
-    # Get backside of card, if it exists
-    if layout in double_sided_layouts:
-        card_back_image_query = f'{card_front_image_query}&face=back'
-        card_art = request_scryfall(card_back_image_query).content
+            adjusted_image.save(image_path, 'PNG')
+            
+    elif adjusted_images and 'adjusted_front_image' in adjusted_images:
+        # double-sided card with adjustments - use adjusted images
+        adjusted_front = adjusted_images['adjusted_front_image']
+        adjusted_back = adjusted_images['adjusted_back_image']
+        
+        for counter in range(quantity):
+            # save front image
+            front_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+            adjusted_front.save(front_path, 'PNG')
+            
+            # save back image
+            back_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+            adjusted_back.save(back_path, 'PNG')
+            
+    else:
+        # no adjustments - use original scryfall download method
+        # Query for the front side
+        card_front_image_query = f'https://api.scryfall.com/cards/{card_set}/{card_collector_number}/?format=image&version=png'
+        card_art = request_scryfall(card_front_image_query).content
         if card_art is not None:
 
             # Save image based on quantity
             for counter in range(quantity):
-                image_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+                image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
 
                 with open(image_path, 'wb') as f:
                     f.write(card_art)
+
+        # Get backside of card, if it exists
+        if layout in double_sided_layouts:
+            card_back_image_query = f'{card_front_image_query}&face=back'
+            card_art = request_scryfall(card_back_image_query).content
+            if card_art is not None:
+
+                # Save image based on quantity
+                for counter in range(quantity):
+                    image_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+
+                    with open(image_path, 'wb') as f:
+                        f.write(card_art)
 
 def remove_nonalphanumeric(s: str) -> str:
     return re.sub(r'[^\w]', '', s)
@@ -304,6 +330,15 @@ def fetch_card_with_gui(
         # fetch the selected card art
         # use the actual card name from scryfall for file naming
         actual_card_name = remove_nonalphanumeric(selected_printing['name'])
+        
+        # extract adjusted images if they exist
+        adjusted_images = {}
+        if 'adjusted_image' in selected_printing:
+            adjusted_images['adjusted_image'] = selected_printing['adjusted_image']
+        if 'adjusted_front_image' in selected_printing:
+            adjusted_images['adjusted_front_image'] = selected_printing['adjusted_front_image'] 
+            adjusted_images['adjusted_back_image'] = selected_printing['adjusted_back_image']
+            
         fetch_card_art(
             index,
             quantity,
@@ -312,7 +347,8 @@ def fetch_card_with_gui(
             selected_printing['collector_number'],
             selected_printing['layout'],
             front_img_dir,
-            double_sided_dir
+            double_sided_dir,
+            adjusted_images if adjusted_images else None
         )
         return True
 
