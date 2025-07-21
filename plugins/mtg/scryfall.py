@@ -298,7 +298,7 @@ def fetch_card_with_gui(
         selected_printing = gui.show_selection_dialog(name, valid_printings)
         
         if selected_printing is None:
-            print(f'skipped card "{name}"')
+            print(f'no printing selected for "{name}"')
             return False
 
         # fetch the selected card art
@@ -330,10 +330,19 @@ def get_handle_card(
     use_gui: bool = False
 ):
     if use_gui:
-        gui = CardSelectorGUI()
+        # keep track of window position across cards
+        shared_position = {'x': None, 'y': None}
         
         def configured_fetch_card_gui(index: int, name: str, card_set: str = None, card_collector_number: int = None, quantity: int = 1):
-            return fetch_card_with_gui(
+            # create fresh gui instance for each card to avoid tkinter issues
+            gui = CardSelectorGUI()
+            
+            # restore window position from previous card
+            if shared_position['x'] is not None:
+                gui.window_x = shared_position['x']
+                gui.window_y = shared_position['y']
+            
+            result = fetch_card_with_gui(
                 index,
                 quantity,
 
@@ -347,6 +356,13 @@ def get_handle_card(
                 double_sided_dir,
                 gui
             )
+            
+            # save window position for next card
+            shared_position['x'] = gui.window_x
+            shared_position['y'] = gui.window_y
+            
+            return result
+            
         return configured_fetch_card_gui
     else:
         def configured_fetch_card(index: int, name: str, card_set: str = None, card_collector_number: int = None, quantity: int = 1):
