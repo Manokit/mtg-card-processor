@@ -1,8 +1,9 @@
 import os
-from typing import List, Set, Tuple
+from typing import List, Set, Tuple, Optional
 import re
 import requests
 import time
+from card_selector_gui import CardSelectorGUI
 
 double_sided_layouts = ['transform', 'modal_dfc']
 
@@ -170,6 +171,84 @@ def fetch_card(
             double_sided_dir
         )
 
+def fetch_card_with_gui(
+    index: int,
+    quantity: int,
+
+    card_set: str,
+    card_collector_number: str,
+    ignore_set_and_collector_number: bool,
+
+    name: str,
+
+    front_img_dir: str,
+    double_sided_dir: str,
+    gui: CardSelectorGUI
+) -> bool:
+    """
+    fetch card with gui selection, returns true if card was selected and downloaded
+    """
+    if not ignore_set_and_collector_number and card_set != "" and card_collector_number != "":
+        # if we have specific set/collector number, just fetch that directly
+        card_info_query = f"https://api.scryfall.com/cards/{card_set}/{card_collector_number}"
+        card_json = request_scryfall(card_info_query).json()
+        
+        fetch_card_art(
+            index, quantity, remove_nonalphanumeric(card_json['name']), 
+            card_set, card_collector_number, card_json['layout'], 
+            front_img_dir, double_sided_dir
+        )
+        return True
+    else:
+        if name == "":
+            return False
+
+        # get card info and all printings
+        clear_card_name = remove_nonalphanumeric(name)
+        card_info_query = f'https://api.scryfall.com/cards/named?exact={clear_card_name}'
+        
+        try:
+            card_json = request_scryfall(card_info_query).json()
+        except Exception as e:
+            print(f'failed to find card "{name}": {e}')
+            return False
+
+        # get all available printings
+        prints_search_json = request_scryfall(card_json['prints_search_uri']).json()
+        card_printings = prints_search_json['data']
+
+        # filter out digital-only and invalid printings
+        valid_printings = []
+        for printing in card_printings:
+            # skip if no image available
+            if 'image_uris' not in printing or 'normal' not in printing['image_uris']:
+                continue
+            valid_printings.append(printing)
+
+        if not valid_printings:
+            print(f'no valid printings found for "{name}"')
+            return False
+
+        # show gui selection dialog
+        selected_printing = gui.show_selection_dialog(name, valid_printings)
+        
+        if selected_printing is None:
+            print(f'skipped card "{name}"')
+            return False
+
+        # fetch the selected card art
+        fetch_card_art(
+            index,
+            quantity,
+            clear_card_name,
+            selected_printing['set'],
+            selected_printing['collector_number'],
+            selected_printing['layout'],
+            front_img_dir,
+            double_sided_dir
+        )
+        return True
+
 def get_handle_card(
     ignore_set_and_collector_number: bool,
 
@@ -180,26 +259,47 @@ def get_handle_card(
     prefer_extra_art: bool,
 
     front_img_dir: str,
-    double_sided_dir: str
+    double_sided_dir: str,
+    use_gui: bool = False
 ):
-    def configured_fetch_card(index: int, name: str, card_set: str = None, card_collector_number: int = None, quantity: int = 1):
-        fetch_card(
-            index,
-            quantity,
+    if use_gui:
+        gui = CardSelectorGUI()
+        
+        def configured_fetch_card_gui(index: int, name: str, card_set: str = None, card_collector_number: int = None, quantity: int = 1):
+            return fetch_card_with_gui(
+                index,
+                quantity,
 
-            card_set,
-            card_collector_number,
-            ignore_set_and_collector_number,
+                card_set,
+                card_collector_number,
+                ignore_set_and_collector_number,
 
-            name,
+                name,
 
-            prefer_older_sets,
-            preferred_sets,
+                front_img_dir,
+                double_sided_dir,
+                gui
+            )
+        return configured_fetch_card_gui
+    else:
+        def configured_fetch_card(index: int, name: str, card_set: str = None, card_collector_number: int = None, quantity: int = 1):
+            fetch_card(
+                index,
+                quantity,
 
-            prefer_showcase,
-            prefer_extra_art,
+                card_set,
+                card_collector_number,
+                ignore_set_and_collector_number,
 
-            front_img_dir,
-            double_sided_dir
-        )
-    return configured_fetch_card
+                name,
+
+                prefer_older_sets,
+                preferred_sets,
+
+                prefer_showcase,
+                prefer_extra_art,
+
+                front_img_dir,
+                double_sided_dir
+            )
+        return configured_fetch_card
