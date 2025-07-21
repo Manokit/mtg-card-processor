@@ -8,9 +8,19 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict
+import os
+import pickle
+import hashlib
 
 class CardSelectorGUI:
-    def __init__(self):
+    # class-level persistent cache shared across all instances
+    _global_image_cache: Dict[str, Image.Image] = {}
+    _cache_lock = threading.Lock()
+    _cache_dir = os.path.join(os.path.expanduser("~"), ".mtg_card_cache")
+    _max_cache_size_mb = 500  # limit cache to 500mb
+    _cache_access_times: Dict[str, float] = {}  # for lru eviction
+
+    def __init__(self, use_caching=True, simple_cache=False):
         self.root = None
         self.selected_printing = None
         self.current_index = 0
@@ -19,12 +29,30 @@ class CardSelectorGUI:
         self.photo_image_back = None
         self.window_x = None
         self.window_y = None
+        self.use_caching = use_caching
+        self.simple_cache = simple_cache
         
-        # image caching and background loading
-        self.image_cache: Dict[str, Image.Image] = {}
+        # per-dialog loading status (not cached globally)
         self.loading_status: Dict[int, str] = {}  # index -> 'loading'/'loaded'/'failed'
         self.executor = ThreadPoolExecutor(max_workers=3)
         self.loading_lock = threading.Lock()
+        
+        # simple in-memory cache (just for this session)
+        self.simple_image_cache: Dict[str, Image.Image] = {}
+        
+        # ensure cache directory exists only if advanced caching is enabled
+        if self.use_caching:
+            try:
+                os.makedirs(self._cache_dir, exist_ok=True)
+                print(f"cache directory: {self._cache_dir}")
+            except Exception as e:
+                print(f"warning: could not create cache directory: {e}")
+                print("image caching will be disabled for this session")
+                self.use_caching = False
+        elif self.simple_cache:
+            print("simple in-memory caching enabled")
+        else:
+            print("caching disabled - using simple mode")
         
     def request_scryfall_image(self, image_url: str) -> bytes:
         """fetch image from scryfall with proper rate limiting"""
@@ -33,22 +61,166 @@ class CardSelectorGUI:
         time.sleep(0.15)  # maintain api rate limits
         return r.content
         
-    def load_image_to_cache(self, image_url: str, cache_key: str) -> Image.Image:
-        """load image from url and cache it"""
+    def _get_cache_key(self, image_url: str) -> str:
+        """generate a cache key from image url"""
+        return hashlib.md5(image_url.encode()).hexdigest()
+    
+    def _get_disk_cache_path(self, cache_key: str) -> str:
+        """get the disk cache file path for a cache key"""
+        return os.path.join(self._cache_dir, f"{cache_key}.pkl")
+    
+    def _load_from_disk_cache(self, cache_key: str) -> Image.Image:
+        """load image from disk cache if available"""
+        cache_path = self._get_disk_cache_path(cache_key)
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'rb') as f:
+                    return pickle.load(f)
+            except Exception as e:
+                print(f"error loading disk cache {cache_key}: {e}")
+                # remove corrupted cache file
+                try:
+                    os.remove(cache_path)
+                except:
+                    pass
+        return None
+    
+    def _save_to_disk_cache(self, cache_key: str, image: Image.Image):
+        """save image to disk cache"""
         try:
-            if cache_key in self.image_cache:
-                return self.image_cache[cache_key]
-                
+            cache_path = self._get_disk_cache_path(cache_key)
+            with open(cache_path, 'wb') as f:
+                pickle.dump(image, f)
+        except Exception as e:
+            print(f"error saving disk cache {cache_key}: {e}")
+    
+    def _estimate_cache_size_mb(self) -> float:
+        """estimate current memory cache size in mb"""
+        total_pixels = 0
+        with self._cache_lock:
+            for image in self._global_image_cache.values():
+                total_pixels += image.width * image.height
+        # rough estimate: 4 bytes per pixel (rgba) 
+        return (total_pixels * 4) / (1024 * 1024)
+    
+    def _evict_lru_cache_entries(self):
+        """evict least recently used entries if cache is too large"""
+        current_size = self._estimate_cache_size_mb()
+        if current_size <= self._max_cache_size_mb:
+            return
+            
+        print(f"cache size {current_size:.1f}mb exceeds limit {self._max_cache_size_mb}mb, evicting entries...")
+        
+        with self._cache_lock:
+            # sort by access time (oldest first)
+            sorted_keys = sorted(self._cache_access_times.keys(), 
+                               key=lambda k: self._cache_access_times[k])
+            
+            # remove oldest entries until we're under the limit
+            for key in sorted_keys:
+                if self._estimate_cache_size_mb() <= self._max_cache_size_mb * 0.8:  # 80% of limit
+                    break
+                    
+                if key in self._global_image_cache:
+                    del self._global_image_cache[key]
+                if key in self._cache_access_times:
+                    del self._cache_access_times[key]
+
+    def load_image_to_cache(self, image_url: str, display_cache_key: str) -> Image.Image:
+        """load image from url and cache it persistently"""
+        try:
+            url_cache_key = self._get_cache_key(image_url)
+            current_time = time.time()
+            
+            # check memory cache first
+            with self._cache_lock:
+                if url_cache_key in self._global_image_cache:
+                    self._cache_access_times[url_cache_key] = current_time
+                    print(f"cache hit (memory): {display_cache_key}")
+                    return self._global_image_cache[url_cache_key]
+            
+            # check disk cache
+            image = self._load_from_disk_cache(url_cache_key)
+            if image is not None:
+                with self._cache_lock:
+                    self._global_image_cache[url_cache_key] = image
+                    self._cache_access_times[url_cache_key] = current_time
+                print(f"cache hit (disk): {display_cache_key}")
+                return image
+            
+            # download from internet
+            print(f"cache miss, downloading: {display_cache_key}")
             image_data = self.request_scryfall_image(image_url)
             image = Image.open(BytesIO(image_data))
             
-            # cache the original image
-            self.image_cache[cache_key] = image
+            # save to both memory and disk cache
+            with self._cache_lock:
+                self._global_image_cache[url_cache_key] = image
+                self._cache_access_times[url_cache_key] = current_time
+            
+            # save to disk cache in background to avoid blocking
+            def save_to_disk():
+                self._save_to_disk_cache(url_cache_key, image)
+            threading.Thread(target=save_to_disk, daemon=True).start()
+            
+            # check if we need to evict old entries
+            self._evict_lru_cache_entries()
+            
             return image
             
         except Exception as e:
-            print(f"error loading image {cache_key}: {e}")
+            print(f"error loading image {display_cache_key}: {e}")
             return None
+            
+    @classmethod  
+    def clear_all_cache(cls):
+        """clear both memory and disk caches - useful for troubleshooting"""
+        with cls._cache_lock:
+            cls._global_image_cache.clear()
+            cls._cache_access_times.clear()
+            
+        # clear disk cache
+        try:
+            import shutil
+            if os.path.exists(cls._cache_dir):
+                shutil.rmtree(cls._cache_dir)
+                os.makedirs(cls._cache_dir, exist_ok=True)
+                print("cleared all image caches")
+        except Exception as e:
+            print(f"error clearing disk cache: {e}")
+            
+    @classmethod
+    def get_cache_stats(cls):
+        """get cache statistics"""
+        with cls._cache_lock:
+            memory_count = len(cls._global_image_cache)
+            memory_size_mb = 0
+            if memory_count > 0:
+                total_pixels = sum(img.width * img.height for img in cls._global_image_cache.values())
+                memory_size_mb = (total_pixels * 4) / (1024 * 1024)
+        
+        disk_count = 0
+        disk_size_mb = 0
+        try:
+            if os.path.exists(cls._cache_dir):
+                cache_files = [f for f in os.listdir(cls._cache_dir) if f.endswith('.pkl')]
+                disk_count = len(cache_files)
+                
+                disk_size_bytes = sum(
+                    os.path.getsize(os.path.join(cls._cache_dir, f)) 
+                    for f in cache_files
+                )
+                disk_size_mb = disk_size_bytes / (1024 * 1024)
+        except Exception as e:
+            print(f"error checking disk cache stats: {e}")
+            
+        return {
+            'memory_images': memory_count,
+            'memory_size_mb': memory_size_mb,
+            'disk_images': disk_count, 
+            'disk_size_mb': disk_size_mb,
+            'cache_dir': cls._cache_dir
+        }
             
     def background_load_printing(self, printing_index: int):
         """load a specific printing's images in background"""
@@ -169,23 +341,43 @@ class CardSelectorGUI:
             status = self.loading_status.get(self.current_index, 'not_started')
         
         if len(card_faces) >= 2:
-            # double-sided card - try to get both faces from cache
-            front_cache_key = f"{self.current_index}_front"
-            back_cache_key = f"{self.current_index}_back"
+            # double-sided card - check if both images are cached
+            front_face = card_faces[0]
+            back_face = card_faces[1]
             
-            if front_cache_key in self.image_cache and back_cache_key in self.image_cache:
-                self.display_double_sided_from_cache(card_faces, front_cache_key, back_cache_key)
-            elif status == 'loading':
+            front_image_uris = front_face.get('image_uris', {})
+            back_image_uris = back_face.get('image_uris', {})
+            
+            if 'normal' in front_image_uris and 'normal' in back_image_uris:
+                front_url = front_image_uris['normal']
+                back_url = back_image_uris['normal']
+                
+                front_cached = self._get_cached_image(front_url) is not None
+                back_cached = self._get_cached_image(back_url) is not None
+                
+                if front_cached and back_cached:
+                    self.display_double_sided_from_cache(card_faces, front_url, back_url)
+                    return
+                
+            # not fully cached yet
+            if status == 'loading':
                 self.display_loading_message("Loading double-sided card...")
             else:
                 self.display_loading_message("Loading images...")
                 
         else:
-            # single-sided card
-            cache_key = f"{self.current_index}_single"
+            # single-sided card - check if image is cached
+            image_url = None
             
-            if cache_key in self.image_cache:
-                self.display_single_from_cache(cache_key)
+            if 'normal' in image_uris:
+                image_url = image_uris['normal']
+            elif len(card_faces) >= 1 and 'image_uris' in card_faces[0]:
+                face_image_uris = card_faces[0]['image_uris']
+                if 'normal' in face_image_uris:
+                    image_url = face_image_uris['normal']
+                    
+            if image_url and self._get_cached_image(image_url) is not None:
+                self.display_single_from_cache(image_url)
             elif status == 'loading':
                 self.display_loading_message("Loading card image...")  
             else:
@@ -206,17 +398,27 @@ class CardSelectorGUI:
             
         self.image_label.configure(text=message, image="")
             
-    def display_single_from_cache(self, cache_key: str):
+    def _get_cached_image(self, image_url: str) -> Image.Image:
+        """get image from global cache by url"""
+        url_cache_key = self._get_cache_key(image_url)
+        with self._cache_lock:
+            if url_cache_key in self._global_image_cache:
+                self._cache_access_times[url_cache_key] = time.time()
+                return self._global_image_cache[url_cache_key]
+        return None
+
+    def display_single_from_cache(self, image_url: str):
         """display single card from cache"""
         try:
-            if cache_key not in self.image_cache:
+            image = self._get_cached_image(image_url)
+            if image is None:
                 self.display_loading_message("Loading image...")
                 return
                 
-            image = self.image_cache[cache_key].copy()
-            image.thumbnail((300, 420), Image.Resampling.LANCZOS)
+            image_copy = image.copy()
+            image_copy.thumbnail((300, 420), Image.Resampling.LANCZOS)
             
-            self.photo_image = ImageTk.PhotoImage(image)
+            self.photo_image = ImageTk.PhotoImage(image_copy)
             
             # clear any back image and hide back label
             self.photo_image_back = None
@@ -236,8 +438,7 @@ class CardSelectorGUI:
     def display_single_card(self, image_url: str):
         """display a single card image (legacy method - now loads to cache)"""
         try:
-            cache_key = f"temp_{hash(image_url)}"
-            image = self.load_image_to_cache(image_url, cache_key)
+            image = self.load_image_to_cache(image_url, f"single_{hash(image_url)}")
             if image:
                 image_copy = image.copy()
                 image_copy.thumbnail((300, 420), Image.Resampling.LANCZOS)
@@ -261,10 +462,13 @@ class CardSelectorGUI:
             print(f"error loading single image: {e}")
             self.display_no_image()
             
-    def display_double_sided_from_cache(self, card_faces: list, front_cache_key: str, back_cache_key: str):
+    def display_double_sided_from_cache(self, card_faces: list, front_image_url: str, back_image_url: str):
         """display double-sided card from cache"""
         try:
-            if front_cache_key not in self.image_cache or back_cache_key not in self.image_cache:
+            front_image = self._get_cached_image(front_image_url)
+            back_image = self._get_cached_image(back_image_url)
+            
+            if front_image is None or back_image is None:
                 self.display_loading_message("Loading double-sided card...")
                 return
                 
@@ -272,14 +476,14 @@ class CardSelectorGUI:
             back_face = card_faces[1]
             
             # load front image from cache
-            front_image = self.image_cache[front_cache_key].copy()
-            front_image.thumbnail((250, 350), Image.Resampling.LANCZOS)
-            self.photo_image = ImageTk.PhotoImage(front_image)
+            front_image_copy = front_image.copy()
+            front_image_copy.thumbnail((250, 350), Image.Resampling.LANCZOS)
+            self.photo_image = ImageTk.PhotoImage(front_image_copy)
             
             # load back image from cache  
-            back_image = self.image_cache[back_cache_key].copy()
-            back_image.thumbnail((250, 350), Image.Resampling.LANCZOS)
-            self.photo_image_back = ImageTk.PhotoImage(back_image)
+            back_image_copy = back_image.copy()
+            back_image_copy.thumbnail((250, 350), Image.Resampling.LANCZOS)
+            self.photo_image_back = ImageTk.PhotoImage(back_image_copy)
             
             # update labels
             self.image_label.configure(image=self.photo_image, text="")
@@ -364,6 +568,146 @@ class CardSelectorGUI:
             self.face_label_back.grid_remove()
             
         self.image_label.configure(text="no image available", image="")
+            
+    def display_simple_first_card(self, printing: dict):
+        """simple fallback method to display first card without caching"""
+        try:
+            print("displaying first card in simple mode...")
+            card_faces = printing.get('card_faces', [])
+            image_uris = printing.get('image_uris', {})
+            
+            # update card info first
+            self.update_card_info_display(printing)
+            
+            # check if this is a double-sided card
+            if len(card_faces) >= 2:
+                # double-sided - show both faces
+                self.display_double_sided_simple(card_faces)
+            elif 'normal' in image_uris:
+                self.display_single_card_simple(image_uris['normal'])
+            elif len(card_faces) >= 1 and 'image_uris' in card_faces[0]:
+                face_image_uris = card_faces[0]['image_uris']
+                if 'normal' in face_image_uris:
+                    self.display_single_card_simple(face_image_uris['normal'])
+                else:
+                    self.display_loading_message("No images available")
+            else:
+                # if we get here, no images found
+                self.display_loading_message("No images available")
+            
+        except Exception as e:
+            print(f"error in display_simple_first_card: {e}")
+            self.display_loading_message("Ready - use navigation buttons")
+            
+    def get_image_with_simple_cache(self, image_url: str) -> Image.Image:
+        """get image with simple caching if enabled, otherwise download fresh"""
+        if self.simple_cache and image_url in self.simple_image_cache:
+            print(f"cache hit: {image_url[:50]}...")
+            return self.simple_image_cache[image_url]
+        
+        print(f"downloading: {image_url[:50]}...")
+        image_data = self.request_scryfall_image(image_url)
+        image = Image.open(BytesIO(image_data))
+        
+        # cache it if simple caching is enabled
+        if self.simple_cache:
+            self.simple_image_cache[image_url] = image.copy()
+            
+        return image
+
+    def display_single_card_simple(self, image_url: str):
+        """display a single card image with optional simple caching"""
+        try:
+            image = self.get_image_with_simple_cache(image_url)
+            image.thumbnail((300, 420), Image.Resampling.LANCZOS)
+            
+            self.photo_image = ImageTk.PhotoImage(image)
+            
+            # clear any back image and hide back label
+            self.photo_image_back = None
+            if hasattr(self, 'image_label_back'):
+                self.image_label_back.grid_remove()
+            if hasattr(self, 'face_label_front'):
+                self.face_label_front.grid_remove()
+            if hasattr(self, 'face_label_back'):
+                self.face_label_back.grid_remove()
+                
+            self.image_label.configure(image=self.photo_image, text="")
+            
+        except Exception as e:
+            print(f"error loading single image: {e}")
+            self.image_label.configure(text="image failed to load", image="")
+            
+    def display_double_sided_simple(self, card_faces: list):
+        """display both sides of a double-sided card with optional simple caching"""
+        try:
+            front_face = card_faces[0]
+            back_face = card_faces[1]
+            
+            front_image_uris = front_face.get('image_uris', {})
+            back_image_uris = back_face.get('image_uris', {})
+            
+            if 'normal' not in front_image_uris or 'normal' not in back_image_uris:
+                self.image_label.configure(text="no images available", image="")
+                return
+                
+            print(f"loading double-sided images...")
+            
+            # load front image with simple caching
+            front_image = self.get_image_with_simple_cache(front_image_uris['normal'])
+            front_image.thumbnail((250, 350), Image.Resampling.LANCZOS)
+            self.photo_image = ImageTk.PhotoImage(front_image)
+            
+            # load back image with simple caching
+            back_image = self.get_image_with_simple_cache(back_image_uris['normal'])
+            back_image.thumbnail((250, 350), Image.Resampling.LANCZOS)
+            self.photo_image_back = ImageTk.PhotoImage(back_image)
+            
+            # update labels
+            self.image_label.configure(image=self.photo_image, text="")
+            
+            # show back image (create if doesn't exist)
+            if not hasattr(self, 'image_label_back'):
+                self.create_back_image_elements()
+            
+            self.image_label_back.configure(image=self.photo_image_back, text="")
+            self.image_label_back.grid()
+            
+            # show face names
+            if hasattr(self, 'face_label_front'):
+                self.face_label_front.configure(text=front_face.get('name', 'Front'))
+                self.face_label_front.grid()
+            if hasattr(self, 'face_label_back'):
+                self.face_label_back.configure(text=back_face.get('name', 'Back'))
+                self.face_label_back.grid()
+                
+        except Exception as e:
+            print(f"error loading double-sided images: {e}")
+            self.image_label.configure(text="double-sided images failed to load", image="")
+            
+    def update_card_info_display(self, printing: dict):
+        """update just the card info section"""
+        try:
+            # update counter label with current index
+            counter_text = f"{self.current_index + 1} / {len(self.printings)}"
+            self.counter_label.configure(text=counter_text)
+            
+            # update card info (reuse existing logic)
+            set_name = printing.get('set_name', 'Unknown Set')
+            set_code = printing.get('set', '').upper()
+            collector_number = printing.get('collector_number', '')
+            rarity = printing.get('rarity', '').title()
+            release_date = printing.get('released_at', '')
+            
+            info_text = f"Set: {set_name} ({set_code})\n"
+            info_text += f"Collector #: {collector_number}\n"
+            info_text += f"Rarity: {rarity}\n"
+            info_text += f"Released: {release_date}"
+            
+            self.info_label.configure(text=info_text)
+            
+        except Exception as e:
+            print(f"error updating card info: {e}")
         
     def create_back_image_elements(self):
         """create gui elements for back image display"""
@@ -455,23 +799,61 @@ class CardSelectorGUI:
         """go to previous printing"""
         if self.printings and self.current_index > 0:
             self.current_index -= 1
-            self.update_display()
             
-            # trigger background loading for this printing if not loaded
-            with self.loading_lock:
-                if self.current_index not in self.loading_status:
-                    self.executor.submit(self.background_load_printing, self.current_index)
+            if self.use_caching:
+                self.update_display()
+                # trigger background loading for this printing if not loaded
+                with self.loading_lock:
+                    if self.current_index not in self.loading_status:
+                        self.executor.submit(self.background_load_printing, self.current_index)
+            else:
+                # simple mode - just display current card directly
+                self.display_simple_current_card()
             
     def next_card(self):
         """go to next printing"""
         if self.printings and self.current_index < len(self.printings) - 1:
             self.current_index += 1
-            self.update_display()
             
-            # trigger background loading for this printing if not loaded
-            with self.loading_lock:
-                if self.current_index not in self.loading_status:
-                    self.executor.submit(self.background_load_printing, self.current_index)
+            if self.use_caching:
+                self.update_display()
+                # trigger background loading for this printing if not loaded
+                with self.loading_lock:
+                    if self.current_index not in self.loading_status:
+                        self.executor.submit(self.background_load_printing, self.current_index)
+            else:
+                # simple mode - just display current card directly
+                self.display_simple_current_card()
+                
+    def display_simple_current_card(self):
+        """display the current card in simple mode without caching"""
+        if not self.printings or self.current_index >= len(self.printings):
+            return
+            
+        printing = self.printings[self.current_index]
+        
+        # update card info
+        self.update_card_info_display(printing)
+        
+        # display the image(s)
+        card_faces = printing.get('card_faces', [])
+        image_uris = printing.get('image_uris', {})
+        
+        # check if this is a double-sided card
+        if len(card_faces) >= 2:
+            # double-sided card - show both faces
+            self.display_double_sided_simple(card_faces)
+        elif 'normal' in image_uris:
+            self.display_single_card_simple(image_uris['normal'])
+        elif len(card_faces) >= 1 and 'image_uris' in card_faces[0]:
+            face_image_uris = card_faces[0]['image_uris']
+            if 'normal' in face_image_uris:
+                self.display_single_card_simple(face_image_uris['normal'])
+            else:
+                self.image_label.configure(text="no image available", image="")
+        else:
+            # no image found
+            self.image_label.configure(text="no image available", image="")
             
     def select_card(self):
         """select current printing and close window"""
@@ -509,8 +891,7 @@ class CardSelectorGUI:
         except Exception as e:
             print(f"error shutting down executor: {e}")
             
-        # clear caches to free memory
-        self.image_cache.clear()
+        # clear per-dialog state (but keep global image cache for next time!)
         self.loading_status.clear()
         
     def save_window_position(self):
@@ -533,27 +914,52 @@ class CardSelectorGUI:
     def show_selection_dialog(self, card_name: str, printings: list) -> dict:
         """show gui for selecting card printing, returns selected printing or none"""
         try:
+            print(f"initializing gui for card: {card_name}")
             self.printings = printings
             self.current_index = 0
             self.selected_printing = None
             
-            # reset caches and loading state for new dialog
-            self.image_cache.clear()
+            # reset per-dialog loading state (but keep global cache!)
             self.loading_status.clear()
             if hasattr(self, 'executor'):
                 self.executor.shutdown(wait=False)
             self.executor = ThreadPoolExecutor(max_workers=3)
             
+            print("creating tkinter window...")
             # create main window - wider to accommodate double-sided cards
             self.root = tk.Tk()
             self.root.title(f"Select Card Art - {card_name}")
             self.root.geometry("750x750")
             self.root.resizable(False, False)
             
-            # restore window position if we have one saved
+            # restore window position if we have one saved, but validate it's on-screen
             if self.window_x is not None and self.window_y is not None:
-                self.root.geometry(f"750x750+{self.window_x}+{self.window_y}")
+                # make sure the window position is reasonable (not off-screen)
+                screen_width = self.root.winfo_screenwidth()
+                screen_height = self.root.winfo_screenheight()
+                
+                # clamp position to screen bounds
+                safe_x = max(0, min(self.window_x, screen_width - 750))
+                safe_y = max(0, min(self.window_y, screen_height - 750))
+                
+                print(f"restoring window position: {safe_x},{safe_y}")
+                self.root.geometry(f"750x750+{safe_x}+{safe_y}")
+            else:
+                # center window on screen
+                screen_width = self.root.winfo_screenwidth()
+                screen_height = self.root.winfo_screenheight()
+                center_x = (screen_width - 750) // 2
+                center_y = (screen_height - 750) // 2
+                print(f"centering window at: {center_x},{center_y}")
+                self.root.geometry(f"750x750+{center_x}+{center_y}")
             
+            # force window to front and focus
+            self.root.lift()
+            self.root.attributes('-topmost', True)
+            self.root.after_idle(lambda: self.root.attributes('-topmost', False))
+            self.root.focus_force()
+            
+            print("creating gui elements...")
             # main frame
             main_frame = ttk.Frame(self.root, padding="10")
             main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -613,17 +1019,58 @@ class CardSelectorGUI:
             
             # initial display and start background loading
             if self.printings:
-                print(f"starting background loading for {len(self.printings)} printings...")
+                print("initializing image loading...")
                 
-                # start background loading - this will load first printing immediately
-                self.start_background_loading()
+                if self.use_caching:
+                    # advanced mode with caching
+                    try:
+                        print("attempting advanced loading with caching...")
+                        # show cache statistics
+                        with self._cache_lock:
+                            cache_size_mb = self._estimate_cache_size_mb()
+                            cached_count = len(self._global_image_cache)
+                        
+                        print(f"starting background loading for {len(self.printings)} printings... (cache: {cached_count} images, {cache_size_mb:.1f}mb)")
+                        
+                        # start background loading - this will load first printing immediately
+                        self.start_background_loading()
+                        
+                        print("background loading started, updating display...")
+                        # update display (will show first printing when loaded)
+                        self.update_display()
+                        
+                        print("starting refresh scheduler...")
+                        # start periodic refresh to update loading progress
+                        self.schedule_refresh()
+                        
+                        print("advanced loading setup complete")
+                        
+                    except Exception as e:
+                        print(f"error during advanced loading setup: {e}")
+                        print("falling back to simple mode...")
+                        self.use_caching = False  # disable caching for this session
+                        
+                if not self.use_caching:
+                    # simple mode - just show first printing without caching
+                    try:
+                        if self.simple_cache:
+                            cache_count = len(self.simple_image_cache)
+                            print(f"using simple mode with caching... (cache: {cache_count} images)")
+                        else:
+                            print("using simple mode (no caching)...")
+                        printing = self.printings[0]
+                        self.display_simple_first_card(printing)
+                        print("simple mode setup complete")
+                        
+                    except Exception as e:
+                        print(f"error in simple mode: {e}")
+                        self.display_loading_message("Ready - use arrow keys to navigate")
                 
-                # update display (will show first printing when loaded)
-                self.update_display()
-                
-                # start periodic refresh to update loading progress
-                self.schedule_refresh()
-                
+            print("showing gui window...")
+            # force window to be visible
+            self.root.deiconify()  # make sure window is not minimized
+            self.root.update()     # force update before mainloop
+            
             # show dialog and wait for user interaction
             self.root.mainloop()
             
