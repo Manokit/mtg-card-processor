@@ -42,6 +42,8 @@ Options:
                                   treatment
   --prefer_extra_art               Prefer fetching cards with full art,
                                   borderless, or extended art.
+  --gui                           Show GUI for manual card art selection
+                                  with navigation controls.
   --help                          Show this message and exit.
 ```
 
@@ -65,6 +67,18 @@ Use a Moxfield decklist named `my_decklist.txt` and ignore all the provided sets
 python plugins/mtg/fetch.py game/decklist/my_decklist.txt moxfield -i --prefer_extra_art
 ```
 
+**Use the GUI to manually select card art for each card in a deck:**
+
+```sh
+python plugins/mtg/fetch.py game/decklist/my_decklist.txt moxfield --gui
+```
+
+Use the GUI with a Simple decklist, ignoring any set/collector number information:
+
+```sh
+python plugins/mtg/fetch.py game/decklist/my_cards.txt simple --gui -i
+```
+
 Use an MTG Online decklist named `old_school.txt` and ignore all the provided sets and collector numbers. Instead, get the latest oldest normal versions of these cards (not showcase or full/borderless/extended art).
 
 ```sh
@@ -76,6 +90,27 @@ Use a Deckstats decklist named `eldraine_commander.txt`. Use the set and collect
 ```sh
 python plugins/mtg/fetch.py game/decklist/eldraine_commander.txt deckstats -s eld -s woe
 ```
+
+## GUI Mode
+
+The `--gui` flag enables interactive card art selection with a graphical interface. For each unique card in your decklist:
+
+- **Browse all available printings** with left/right arrow keys or navigation buttons
+- **See detailed information** including set name, rarity, release date, and special treatments
+- **Preview the actual card image** before selecting
+- **Navigate with keyboard shortcuts:**
+  - Left/Right arrows: Browse printings
+  - Enter: Select current version
+  - Escape: Skip card (don't download any version)
+
+The GUI shows a counter (e.g., "3 / 15") indicating which printing you're viewing out of the total available. When you find the desired artwork, click "Select This Version" to download that specific printing for all copies of that card in your deck.
+
+**GUI Features:**
+- Displays card images at readable size with proper aspect ratio
+- Shows frame effects (showcase, extended art, etc.)
+- Highlights special treatments (full art, borderless, promo, digital)
+- Gracefully falls back to command-line mode if GUI is unavailable
+- Maintains proper API rate limiting while loading images
 
 ## Formats
 
