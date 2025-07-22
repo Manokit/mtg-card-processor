@@ -57,6 +57,8 @@ class CardSelectorGUI:
         self.selection_mask = None  # PIL Image mask (same size as card)
         self.selection_mask_back = None  # mask for back side
         self.brush_size = 10
+        self.brush_mode = 'add'  # 'add' or 'subtract'
+        self.current_draw_mode = 'add'  # mode for current drawing session
         self.color_tolerance = 30
         self.is_drawing = False
         self.last_draw_pos = None
@@ -742,16 +744,20 @@ class CardSelectorGUI:
             draw = ImageDraw.Draw(mask)
             brush_radius = self.brush_size // 2
             
+            # determine fill color based on current drawing mode
+            mode_to_use = self.current_draw_mode if self.is_drawing else self.brush_mode
+            fill_color = 255 if mode_to_use == 'add' else 0  # white = selected, black = not selected
+            
             # draw circle at position
             draw.ellipse([
                 x - brush_radius, y - brush_radius,
                 x + brush_radius, y + brush_radius
-            ], fill=255)  # white = selected
+            ], fill=fill_color)
             
             # if we have a last position, draw line between them
             if self.last_draw_pos:
                 last_x, last_y = self.last_draw_pos
-                draw.line([last_x, last_y, x, y], fill=255, width=self.brush_size)
+                draw.line([last_x, last_y, x, y], fill=fill_color, width=self.brush_size)
                 
             self.last_draw_pos = (x, y)
             
@@ -1235,9 +1241,25 @@ class CardSelectorGUI:
                                     command=self.on_selection_mode_change)
         color_radio.grid(row=2, column=0, sticky=tk.W, pady=(0, 10))
         
-        # brush size (only visible when brush mode is active)
-        self.brush_size_frame = ttk.Frame(selection_frame)
-        self.brush_size_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        # brush controls (only visible when brush mode is active)
+        self.brush_controls_frame = ttk.Frame(selection_frame)
+        self.brush_controls_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        
+        # brush mode radio buttons
+        self.brush_mode_var = tk.StringVar(value='add')
+        add_brush_radio = ttk.Radiobutton(self.brush_controls_frame, text="Add to Selection", 
+                                        variable=self.brush_mode_var, value='add',
+                                        command=self.on_brush_mode_change)
+        add_brush_radio.grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        
+        subtract_brush_radio = ttk.Radiobutton(self.brush_controls_frame, text="Erase Selection", 
+                                             variable=self.brush_mode_var, value='subtract',
+                                             command=self.on_brush_mode_change)
+        subtract_brush_radio.grid(row=0, column=1, sticky=tk.W, padx=(20, 0), pady=(0, 5))
+        
+        # brush size
+        self.brush_size_frame = ttk.Frame(self.brush_controls_frame)
+        self.brush_size_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(5, 0))
         
         ttk.Label(self.brush_size_frame, text="Brush Size:").grid(row=0, column=0, sticky=tk.W)
         self.brush_size_var = tk.IntVar(value=self.brush_size)
@@ -1269,13 +1291,20 @@ class CardSelectorGUI:
         select_all_button = ttk.Button(button_frame, text="Select All", command=self.select_all)
         select_all_button.grid(row=0, column=1, padx=(0, 5))
         
+        frame_sel_button = ttk.Button(button_frame, text="Frame Only", command=self.select_frame)
+        frame_sel_button.grid(row=0, column=2, padx=(0, 5))
+        
         invert_sel_button = ttk.Button(button_frame, text="Invert", command=self.invert_selection)
-        invert_sel_button.grid(row=0, column=2)
+        invert_sel_button.grid(row=0, column=3)
+        
+        # smart fix button (prominent)
+        smart_fix_button = ttk.Button(button_frame, text="🎯 Smart Fix", command=self.smart_fix_card)
+        smart_fix_button.grid(row=1, column=0, columnspan=4, pady=(10, 0), sticky=(tk.W, tk.E))
         
         # instructions label
-        self.instruction_label = ttk.Label(selection_frame, text="Adjust entire image", 
+        self.instruction_label = ttk.Label(selection_frame, text="Try Smart Fix first, then fine-tune", 
                                          font=("Arial", 9), foreground="gray")
-        self.instruction_label.grid(row=6, column=0, sticky=tk.W, pady=(10, 0))
+        self.instruction_label.grid(row=7, column=0, sticky=tk.W, pady=(10, 0))
         
         # update initial visibility
         self.update_selection_ui_visibility()
@@ -1376,6 +1405,15 @@ class CardSelectorGUI:
             self.selection_mask_back = Image.new('L', self.original_image_back.size, 255)
         self.refresh_image_display()
         
+    def select_frame(self):
+        """select only the card frame areas (excludes art and text)"""
+        if self.original_image:
+            self.selection_mask = self.create_smart_frame_mask(self.original_image)
+        if self.original_image_back:
+            self.selection_mask_back = self.create_smart_frame_mask(self.original_image_back)
+        self.refresh_image_display()
+        print("Frame areas selected - adjust colors without affecting art or text")
+        
     def invert_selection(self):
         """invert current selection"""
         try:
@@ -1392,23 +1430,344 @@ class CardSelectorGUI:
             
         except Exception as e:
             print(f"selection inversion error: {e}")
+            
+    def analyze_card_issues(self, image: Image.Image) -> dict:
+        """analyze image for common MTG card issues"""
+        try:
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+                
+            img_array = np.array(image)
+            height, width = img_array.shape[:2]
+            
+            issues = {
+                'text_box_washed_out': False,
+                'color_cast': 'neutral',
+                'overall_too_dark': False,
+                'overall_too_bright': False,
+                'low_contrast': False,
+                'text_box_region': None,
+                'border_region': None
+            }
+            
+            # detect text box region (usually bottom 35-45% of card)
+            text_box_start = int(height * 0.55)
+            text_box_region = img_array[text_box_start:, :]
+            border_top_region = img_array[:int(height * 0.15), :]
+            border_side_region = np.concatenate([
+                img_array[:, :int(width * 0.1)],
+                img_array[:, int(width * 0.9):]
+            ], axis=1)
+            
+            issues['text_box_region'] = (text_box_start, height, 0, width)
+            issues['border_region'] = border_top_region
+            
+            # analyze brightness levels
+            text_box_brightness = np.mean(text_box_region)
+            border_brightness = np.mean(border_top_region)
+            overall_brightness = np.mean(img_array)
+            
+            # detect washed out text box (significantly brighter than border)
+            if text_box_brightness > border_brightness + 20:
+                issues['text_box_washed_out'] = True
+                
+            # analyze color temperature
+            r_avg = np.mean(img_array[:, :, 0])
+            g_avg = np.mean(img_array[:, :, 1])
+            b_avg = np.mean(img_array[:, :, 2])
+            
+            warm_score = (r_avg + g_avg) - b_avg * 2
+            if warm_score > 20:
+                issues['color_cast'] = 'warm'
+            elif warm_score < -20:
+                issues['color_cast'] = 'cool'
+                
+            # overall brightness issues
+            if overall_brightness < 80:
+                issues['overall_too_dark'] = True
+            elif overall_brightness > 180:
+                issues['overall_too_bright'] = True
+                
+            # contrast analysis
+            contrast_score = np.std(img_array)
+            if contrast_score < 45:
+                issues['low_contrast'] = True
+                
+            return issues
+            
+        except Exception as e:
+            print(f"card analysis error: {e}")
+            return {'error': True}
+            
+    def create_text_box_mask(self, image: Image.Image) -> Image.Image:
+        """create mask for the text box area"""
+        try:
+            width, height = image.size
+            mask = Image.new('L', (width, height), 0)
+            
+            # create rectangular mask for text box region
+            text_box_start = int(height * 0.55)
+            text_box_end = int(height * 0.92)  # leave some margin at bottom
+            
+            mask_array = np.array(mask)
+            mask_array[text_box_start:text_box_end, :] = 255
+            
+            return Image.fromarray(mask_array, mode='L')
+            
+        except Exception as e:
+            print(f"text box mask error: {e}")
+            return Image.new('L', image.size, 0)
+            
+    def create_border_mask(self, image: Image.Image) -> Image.Image:
+        """create mask for the entire card border/frame (excludes art area)"""
+        try:
+            width, height = image.size
+            mask = Image.new('L', (width, height), 255)  # start with everything selected
+            
+            mask_array = np.array(mask)
+            
+            # define art area (center rectangle) - exclude from border mask
+            art_left = int(width * 0.08)    # 8% from left
+            art_right = int(width * 0.92)   # 8% from right  
+            art_top = int(height * 0.15)    # 15% from top (below name)
+            art_bottom = int(height * 0.55) # 55% from top (above text)
+            
+            # clear art area (set to black = not selected)
+            mask_array[art_top:art_bottom, art_left:art_right] = 0
+            
+            return Image.fromarray(mask_array, mode='L')
+            
+        except Exception as e:
+            print(f"border mask error: {e}")
+            return Image.new('L', image.size, 255)
+            
+    def create_smart_frame_mask(self, image: Image.Image) -> Image.Image:
+        """create intelligent mask for MTG card frame areas needing color correction"""
+        try:
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+                
+            width, height = image.size
+            img_array = np.array(image)
+            mask = Image.new('L', (width, height), 0)  # start with nothing selected
+            mask_array = np.array(mask)
+            
+            print("Creating precise frame mask...")
+            
+            # define precise regions that need color correction
+            # 1. outer border areas (thin strips around the edges)
+            border_width = int(width * 0.08)   # 8% border width
+            border_height = int(height * 0.05) # 5% border height
+            
+            # top border (but not too deep - avoid name area)
+            mask_array[0:border_height, :] = 255
+            
+            # bottom border 
+            mask_array[height-border_height:height, :] = 255
+            
+            # left border
+            mask_array[:, 0:border_width] = 255
+            
+            # right border  
+            mask_array[:, width-border_width:width] = 255
+            
+            # 2. text box background area (bottom portion of card)
+            text_box_start = int(height * 0.58)  # start lower to avoid type line
+            text_box_end = int(height * 0.90)    # end before bottom border
+            text_box_left = int(width * 0.08)    # respect side borders
+            text_box_right = int(width * 0.92)   # respect side borders
+            
+            # select text box background but exclude very bright areas (actual text)
+            text_region = img_array[text_box_start:text_box_end, text_box_left:text_box_right]
+            brightness = 0.299 * text_region[:, :, 0] + 0.587 * text_region[:, :, 1] + 0.114 * text_region[:, :, 2]
+            
+            # create text box mask - select background but not bright text
+            text_box_mask = np.ones(brightness.shape, dtype=np.uint8) * 255
+            text_box_mask[brightness > 200] = 0  # exclude bright text pixels
+            
+            # apply text box mask
+            mask_array[text_box_start:text_box_end, text_box_left:text_box_right] = text_box_mask
+            
+            # 3. EXCLUDE name box and type line areas completely
+            name_box_start = int(height * 0.04)
+            name_box_end = int(height * 0.14)
+            mask_array[name_box_start:name_box_end, :] = 0  # never select name area
+            
+            type_line_start = int(height * 0.47) 
+            type_line_end = int(height * 0.57)
+            mask_array[type_line_start:type_line_end, :] = 0  # never select type line area
+            
+            # 4. EXCLUDE art area (center)
+            art_left = int(width * 0.08)
+            art_right = int(width * 0.92) 
+            art_top = int(height * 0.14)     # start after name area
+            art_bottom = int(height * 0.47)  # end before type line
+            
+            mask_array[art_top:art_bottom, art_left:art_right] = 0  # never select art
+            
+            return Image.fromarray(mask_array, mode='L')
+            
+        except Exception as e:
+            print(f"smart frame mask error: {e}")
+            # fallback to simple text box only
+            return self.create_text_box_mask(image)
+            
+    def create_washed_out_mask(self, image: Image.Image, threshold: int = 200) -> Image.Image:
+        """create mask for overly bright/washed out areas"""
+        try:
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+                
+            img_array = np.array(image)
+            
+            # calculate brightness (luminance)
+            brightness = 0.299 * img_array[:, :, 0] + 0.587 * img_array[:, :, 1] + 0.114 * img_array[:, :, 2]
+            
+            # create mask where brightness exceeds threshold
+            mask_array = np.zeros(brightness.shape, dtype=np.uint8)
+            mask_array[brightness > threshold] = 255
+            
+            return Image.fromarray(mask_array, mode='L')
+            
+        except Exception as e:
+            print(f"washed out mask error: {e}")
+            return Image.new('L', image.size, 0)
+
+    def smart_fix_card(self):
+        """automatically detect and fix common MTG card issues"""
+        try:
+            print("🎯 Running Smart Fix analysis...")
+            
+            # work on front image primarily
+            if not self.original_image:
+                print("No image loaded for smart fix")
+                return
+                
+            # analyze issues
+            issues = self.analyze_card_issues(self.original_image)
+            if 'error' in issues:
+                print("Smart fix analysis failed")
+                return
+                
+            print(f"Issues detected: {issues}")
+            
+            # reset to default adjustments first
+            self.brightness = 1.0
+            self.contrast = 1.0
+            self.saturation = 1.0
+            self.gamma = 1.0
+            self.color_balance = 0.0
+            
+            # create smart selection mask
+            smart_mask = None
+            adjustments_applied = []
+            
+            # fix washed out frame areas (including consistent border treatment)
+            if issues['text_box_washed_out']:
+                print("Fixing washed out frame areas...")
+                frame_mask = self.create_smart_frame_mask(self.original_image)
+                smart_mask = self.combine_masks(smart_mask, frame_mask)
+                
+                # apply corrections for frame areas
+                self.brightness = 0.8  # darken
+                self.contrast = 1.3    # increase contrast
+                self.gamma = 0.9       # adjust midtones
+                adjustments_applied.append("frame areas darkened")
+                
+            # fix color temperature
+            if issues['color_cast'] == 'warm':
+                print("Correcting warm color cast...")
+                self.color_balance = -25  # cool it down
+                adjustments_applied.append("cooled color temperature")
+                
+            elif issues['color_cast'] == 'cool':
+                print("Correcting cool color cast...")
+                self.color_balance = 15   # warm it up
+                adjustments_applied.append("warmed color temperature")
+                
+            # fix overall brightness issues
+            if issues['overall_too_dark']:
+                print("Brightening overall image...")
+                self.brightness = max(self.brightness, 1.2)
+                adjustments_applied.append("brightened image")
+                
+            elif issues['overall_too_bright']:
+                print("Darkening overall image...")
+                self.brightness = min(self.brightness, 0.85)
+                adjustments_applied.append("darkened image")
+                
+            # fix low contrast
+            if issues['low_contrast']:
+                print("Boosting contrast...")
+                self.contrast = max(self.contrast, 1.4)
+                adjustments_applied.append("boosted contrast")
+                
+            # enhance saturation if colors are washed out
+            if issues['text_box_washed_out'] or issues['overall_too_bright']:
+                print("Enhancing color saturation...")
+                self.saturation = 1.15
+                adjustments_applied.append("enhanced saturation")
+                
+            # update slider values
+            if hasattr(self, 'brightness_var'):
+                self.brightness_var.set(self.brightness)
+                self.brightness_value_label.configure(text=f"{self.brightness:.2f}")
+            if hasattr(self, 'contrast_var'):
+                self.contrast_var.set(self.contrast)  
+                self.contrast_value_label.configure(text=f"{self.contrast:.2f}")
+            if hasattr(self, 'saturation_var'):
+                self.saturation_var.set(self.saturation)
+                self.saturation_value_label.configure(text=f"{self.saturation:.2f}")
+            if hasattr(self, 'gamma_var'):
+                self.gamma_var.set(self.gamma)
+                self.gamma_value_label.configure(text=f"{self.gamma:.2f}")
+            if hasattr(self, 'color_balance_var'):
+                self.color_balance_var.set(self.color_balance)
+                self.color_balance_value_label.configure(text=f"{self.color_balance:.0f}")
+                
+            # apply smart mask if we created one
+            if smart_mask:
+                self.selection_mask = smart_mask
+                
+                # if double-sided card, apply same mask to back
+                if self.original_image_back:
+                    self.selection_mask_back = self.create_smart_frame_mask(self.original_image_back)
+                    print("Smart frame mask applied to back side as well")
+                
+                self.selection_mode = 'color'  # switch to show we have a selection
+                if hasattr(self, 'selection_mode_var'):
+                    self.selection_mode_var.set('color')
+                print("Smart selection mask applied")
+                
+            # update display
+            self.refresh_image_display()
+            
+            # show results
+            if adjustments_applied:
+                print(f"✅ Smart Fix complete! Applied: {', '.join(adjustments_applied)}")
+                print("💡 Fine-tune with sliders or add more selections if needed")
+            else:
+                print("✅ Image looks good - no major issues detected")
+                
+        except Exception as e:
+            print(f"Smart fix error: {e}")
         
     def update_selection_ui_visibility(self):
         """show/hide selection controls based on current mode"""
-        if hasattr(self, 'brush_size_frame'):
+        if hasattr(self, 'brush_controls_frame'):
             if self.selection_mode == 'brush':
-                self.brush_size_frame.grid()
+                self.brush_controls_frame.grid()
                 self.tolerance_frame.grid_remove()
-                self.instruction_label.configure(text="Click and drag to paint selection")
+                self.instruction_label.configure(text="Paint to add/erase selection • Perfect for fine-tuning Smart Fix")
             elif self.selection_mode == 'color':
-                self.brush_size_frame.grid_remove()
+                self.brush_controls_frame.grid_remove()
                 self.tolerance_frame.grid()
                 self.instruction_label.configure(text="Click color to select • Cmd/Ctrl+Click to add • Alt/Shift+Click to subtract")
             else:
-                self.brush_size_frame.grid_remove()
+                self.brush_controls_frame.grid_remove()
                 self.tolerance_frame.grid_remove()
-                self.instruction_label.configure(text="Adjust entire image")
-                
+                self.instruction_label.configure(text="Try Smart Fix first, then fine-tune")
+        
     def on_selection_mode_change(self):
         """called when selection mode radio button changes"""
         self.selection_mode = self.selection_mode_var.get()
@@ -1419,6 +1778,11 @@ class CardSelectorGUI:
         """called when brush size slider changes"""
         self.brush_size = int(float(value))
         self.brush_size_label.configure(text=str(self.brush_size))
+        
+    def on_brush_mode_change(self):
+        """called when brush mode radio button changes"""
+        self.brush_mode = self.brush_mode_var.get()
+        print(f"brush mode: {self.brush_mode}")
         
     def on_tolerance_change(self, value):
         """called when color tolerance slider changes"""
@@ -1609,7 +1973,14 @@ class CardSelectorGUI:
                 self.refresh_image_display()
                 
             elif self.selection_mode == 'brush':
-                # brush selection (additive behavior is natural with brush)
+                # brush selection - determine mode for this drawing session
+                if is_additive:
+                    self.current_draw_mode = 'add'
+                elif is_subtractive:
+                    self.current_draw_mode = 'subtract'
+                else:
+                    self.current_draw_mode = self.brush_mode  # use current brush mode setting
+                
                 self.is_drawing = True
                 self.last_draw_pos = (img_x, img_y)
                 self.apply_selection_to_mask(img_x, img_y, is_front)
@@ -1631,7 +2002,7 @@ class CardSelectorGUI:
             if img_x is None or img_y is None:
                 return
                 
-            # continue brush stroke
+            # continue brush stroke (brush mode was set during click event)
             self.apply_selection_to_mask(img_x, img_y, is_front)
             self.refresh_image_display()
             
