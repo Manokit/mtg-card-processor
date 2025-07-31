@@ -28,6 +28,7 @@ default_output_path = os.path.join(output_directory, 'game.pdf')
 @click.option("--load_offset", default=False, is_flag=True, help="Apply saved offsets. See `offset_pdf.py` for more information.")
 @click.option("--skip", type=click.IntRange(min=0), multiple=True, help="Skip a card based on its index. Useful for registration issues. Examples: 0, 4.")
 @click.option("--name", help="Label each page of the PDF with a name.")
+@click.option("--no_flip_backs", default=False, is_flag=True, help="Don't flip card backs 180 degrees. Use for manual printing where you physically flip the paper.")
 @click.version_option("1.4.0")
 
 def cli(
@@ -46,7 +47,8 @@ def cli(
     quality,
     skip,
     load_offset,
-    name
+    name,
+    no_flip_backs
 ):
     # determine front directory path
     if front_dir_path is None:
@@ -81,7 +83,8 @@ def cli(
         quality,
         skip,
         load_offset,
-        name
+        name,
+        no_flip_backs
     )
 
 if __name__ == '__main__':

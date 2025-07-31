@@ -12,21 +12,34 @@ If you're on macOS or Linux, open **Terminal**. If you're on Windows, open **Pow
 
 Create and start your virtual Python environment and install Python dependencies if you have not done so already. See [here](../../README.md#basic-usage) for more information.
 
-Put your decklist into a text file in [game/decklist](../game/decklist/). In this example, the filename is `deck.txt` and the decklist format is MTG Arena (`mtga`).
+The MTG plugin supports two input methods:
 
-Run the script.
+### Option 1: File-based input (Traditional)
+Put your decklist into a text file in `game/decklist`. In this example, the filename is `deck.txt` and the decklist format is MTG Arena (`mtga`).
 
 ```sh
 python plugins/mtg/fetch.py game/decklist/deck.txt mtga
 ```
+
+### Option 2: URL-based input (New!)
+**Simply paste a deck URL from Archidekt or Moxfield - no file needed!**
+
+```sh
+python plugins/mtg/fetch.py 'https://archidekt.com/decks/14914060/ghostbusters_type_beat'
+```
+
+**Supported URLs:**
+- **Archidekt**: `https://archidekt.com/decks/[deck_id]/[deck_name]`
+- **Moxfield**: `https://www.moxfield.com/decks/[deck_id]`
+
+The format is automatically detected from the URL, so you don't need to specify it manually!
 
 Now you can create the PDF using [`create_pdf.py`](../../README.md#create_pdfpy).
 
 ## CLI Options
 
 ```
-Usage: fetch.py [OPTIONS] DECK_PATH
-                {simple|mtga|mtgo|archidekt|deckstats|moxfield}
+Usage: fetch.py [OPTIONS] DECK_SOURCE [[simple|mtga|mtgo|archidekt|deckstats|moxfield|scryfall_json]]
 
 Options:
   -i, --ignore_set_and_collector_number
@@ -49,8 +62,17 @@ Options:
 
 ### Examples
 
-Use a Moxfield decklist named `my_decklist.txt`.
+**Fetch from Archidekt URL:**
+```sh
+python plugins/mtg/fetch.py 'https://archidekt.com/decks/14914060/ghostbusters_type_beat'
+```
 
+**Fetch from Moxfield URL:**
+```sh
+python plugins/mtg/fetch.py 'https://www.moxfield.com/decks/your_deck_id'
+```
+
+**Use a Moxfield decklist file:**
 ```sh
 python plugins/mtg/fetch.py game/decklist/my_decklist.txt moxfield
 ```
@@ -238,4 +260,5 @@ Scryfall JSON format.
     ]
   }
 }
+```
 ```

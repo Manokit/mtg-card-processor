@@ -4,7 +4,7 @@ import re
 from enum import Enum
 from typing import Callable, Tuple
 
-card_data_tuple = Tuple[str, str, int, int]
+card_data_tuple = Tuple[str, str, str, int]
 
 def parse_deck_helper(deck_text: str, is_card_line: Callable[[str], bool], extract_card_data: Callable[[str], card_data_tuple], handle_card: Callable) -> None:
     error_lines = []
@@ -115,7 +115,7 @@ def parse_mtgo(deck_text, handle_card: Callable) -> None:
 # 1x Assassin's Trophy (sld) 139 [Targeted Disruption]
 # 2x Boseiju Reaches Skyward // Branch of Boseiju (neo) 177 [Ramp] ^Have,#37d67a^
 def parse_archidekt(deck_text, handle_card: Callable) -> None:
-    pattern = re.compile(r'^(\d+)x?\s+(.+?)\s+\((\w+)\)\s+(\d+).*')
+    pattern = re.compile(r'^(\d+)x?\s+(.+?)\s+\((\w+)\)\s+([\w\-]+).*')
     def is_archidekt_card_line(line: str) -> bool:
         return bool(pattern.match(line))
 
