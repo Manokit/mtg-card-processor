@@ -302,7 +302,8 @@ def generate_pdf(
     quality: int,
     skip_indices: List[int],
     load_offset: bool,
-    name: str
+    name: str,
+    no_flip_backs: bool
 ):
     # Sanity checks for the different directories
     f_path = Path(front_dir_path)
@@ -432,7 +433,7 @@ def generate_pdf(
                         (0, 0),
                         ppi_ratio,
                         extend_corners,
-                        flip=True
+                        flip=not no_flip_backs
                     )
 
             # Create single-sided card layout
@@ -564,7 +565,7 @@ def generate_pdf(
                     crop,
                     ppi_ratio,
                     extend_corners,
-                    flip=True
+                    flip=not no_flip_backs
                 )
 
                 # Add the front and back layouts

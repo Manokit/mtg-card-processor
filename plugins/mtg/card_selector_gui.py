@@ -20,6 +20,13 @@ class CardSelectorGUI:
     _cache_dir = os.path.join(os.path.expanduser("~"), ".mtg_card_cache")
     _max_cache_size_mb = 500  # limit cache to 500mb
     _cache_access_times: Dict[str, float] = {}  # for lru eviction
+    
+    # class-level global adjustment settings (persistent across all card selections)
+    _global_brightness = 1.0
+    _global_contrast = 1.0  
+    _global_saturation = 1.0
+    _global_gamma = 1.0
+    _global_color_balance = 0.0  # -100 to +100, negative=cooler, positive=warmer
 
     def __init__(self, use_caching=True, simple_cache=False):
         self.root = None
@@ -41,12 +48,13 @@ class CardSelectorGUI:
         # simple in-memory cache (just for this session)
         self.simple_image_cache: Dict[str, Image.Image] = {}
         
-        # image adjustment parameters
-        self.brightness = 1.0
-        self.contrast = 1.0  
-        self.saturation = 1.0
-        self.gamma = 1.0
-        self.color_balance = 0.0  # -100 to +100, negative=cooler, positive=warmer
+        # global image adjustment parameters are now class-level (removed instance variables)
+        
+        # per-card adjustment overrides (keyed by card index)
+        self.card_adjustments = {}  # index -> {brightness, contrast, saturation, gamma, color_balance}
+        
+        # current adjustment mode
+        self.adjustment_mode = 'global'  # 'global' or 'current_card'
         
         # store original images for adjustment (before processing)
         self.original_image = None
@@ -66,6 +74,67 @@ class CardSelectorGUI:
         # selection overlay canvas
         self.selection_canvas = None
         self.selection_canvas_back = None
+    
+    # property methods to access class-level global settings
+    @property
+    def global_brightness(self):
+        return self.__class__._global_brightness
+    
+    @global_brightness.setter
+    def global_brightness(self, value):
+        self.__class__._global_brightness = value
+    
+    @property
+    def global_contrast(self):
+        return self.__class__._global_contrast
+    
+    @global_contrast.setter
+    def global_contrast(self, value):
+        self.__class__._global_contrast = value
+    
+    @property
+    def global_saturation(self):
+        return self.__class__._global_saturation
+    
+    @global_saturation.setter
+    def global_saturation(self, value):
+        self.__class__._global_saturation = value
+    
+    @property
+    def global_gamma(self):
+        return self.__class__._global_gamma
+    
+    @global_gamma.setter
+    def global_gamma(self, value):
+        self.__class__._global_gamma = value
+    
+    @property
+    def global_color_balance(self):
+        return self.__class__._global_color_balance
+    
+    @global_color_balance.setter
+    def global_color_balance(self, value):
+                self.__class__._global_color_balance = value
+    
+    @classmethod
+    def reset_global_settings(cls):
+        """reset all global settings to defaults"""
+        cls._global_brightness = 1.0
+        cls._global_contrast = 1.0
+        cls._global_saturation = 1.0
+        cls._global_gamma = 1.0
+        cls._global_color_balance = 0.0
+    
+    @classmethod
+    def get_global_settings_summary(cls):
+        """get a summary of current global settings"""
+        return {
+            'brightness': cls._global_brightness,
+            'contrast': cls._global_contrast,
+            'saturation': cls._global_saturation,
+            'gamma': cls._global_gamma,
+            'color_balance': cls._global_color_balance
+        }
         
         # ensure cache directory exists only if advanced caching is enabled
         if self.use_caching:
@@ -80,6 +149,93 @@ class CardSelectorGUI:
             print("simple in-memory caching enabled")
         else:
             print("caching disabled - using simple mode")
+            
+        # show current global settings on initialization
+        print(f"global settings: brightness={self.global_brightness:.2f}, contrast={self.global_contrast:.2f}, saturation={self.global_saturation:.2f}, gamma={self.global_gamma:.2f}, color_balance={self.global_color_balance:.0f}")
+    
+    def get_current_adjustments(self):
+        """get current effective adjustment values (global or per-card override)"""
+        if self.adjustment_mode == 'current_card' and self.current_index in self.card_adjustments:
+            # use per-card overrides
+            overrides = self.card_adjustments[self.current_index]
+            return {
+                'brightness': overrides.get('brightness', self.global_brightness),
+                'contrast': overrides.get('contrast', self.global_contrast),
+                'saturation': overrides.get('saturation', self.global_saturation),
+                'gamma': overrides.get('gamma', self.global_gamma),
+                'color_balance': overrides.get('color_balance', self.global_color_balance)
+            }
+        else:
+            # use global settings
+            return {
+                'brightness': self.global_brightness,
+                'contrast': self.global_contrast,
+                'saturation': self.global_saturation,
+                'gamma': self.global_gamma,
+                'color_balance': self.global_color_balance
+            }
+    
+    def set_current_adjustments(self, brightness=None, contrast=None, saturation=None, gamma=None, color_balance=None):
+        """set current adjustment values (updates global or creates per-card override)"""
+        if self.adjustment_mode == 'global':
+            # update global settings
+            changes = []
+            if brightness is not None:
+                self.global_brightness = brightness
+                changes.append(f"brightness={brightness:.2f}")
+            if contrast is not None:
+                self.global_contrast = contrast
+                changes.append(f"contrast={contrast:.2f}")
+            if saturation is not None:
+                self.global_saturation = saturation
+                changes.append(f"saturation={saturation:.2f}")
+            if gamma is not None:
+                self.global_gamma = gamma
+                changes.append(f"gamma={gamma:.2f}")
+            if color_balance is not None:
+                self.global_color_balance = color_balance
+                changes.append(f"color_balance={color_balance:.0f}")
+            
+            if changes:
+                print(f"global settings updated: {', '.join(changes)}")
+        else:
+            # create or update per-card override
+            if self.current_index not in self.card_adjustments:
+                self.card_adjustments[self.current_index] = {}
+            
+            overrides = self.card_adjustments[self.current_index]
+            changes = []
+            if brightness is not None:
+                overrides['brightness'] = brightness
+                changes.append(f"brightness={brightness:.2f}")
+            if contrast is not None:
+                overrides['contrast'] = contrast
+                changes.append(f"contrast={contrast:.2f}")
+            if saturation is not None:
+                overrides['saturation'] = saturation
+                changes.append(f"saturation={saturation:.2f}")
+            if gamma is not None:
+                overrides['gamma'] = gamma
+                changes.append(f"gamma={gamma:.2f}")
+            if color_balance is not None:
+                overrides['color_balance'] = color_balance
+                changes.append(f"color_balance={color_balance:.0f}")
+                
+            if changes:
+                print(f"card {self.current_index} overrides updated: {', '.join(changes)}")
+    
+    def has_card_overrides(self, card_index=None):
+        """check if a card has adjustment overrides"""
+        if card_index is None:
+            card_index = self.current_index
+        return card_index in self.card_adjustments
+    
+    def clear_card_overrides(self, card_index=None):
+        """clear per-card adjustment overrides"""
+        if card_index is None:
+            card_index = self.current_index
+        if card_index in self.card_adjustments:
+            del self.card_adjustments[card_index]
         
     def request_scryfall_image(self, image_url: str) -> bytes:
         """fetch image from scryfall with proper rate limiting"""
@@ -779,6 +935,9 @@ class CardSelectorGUI:
             return None
             
         try:
+            # get current effective adjustment values
+            adjustments = self.get_current_adjustments()
+            
             # start with copy of original and ensure RGB mode
             original = image.copy()
             if original.mode != 'RGB':
@@ -788,25 +947,25 @@ class CardSelectorGUI:
             adjusted = original.copy()
             
             # apply gamma correction first (affects overall brightness curve)
-            adjusted = self.apply_gamma_correction(adjusted, self.gamma)
+            adjusted = self.apply_gamma_correction(adjusted, adjustments['gamma'])
             
             # apply brightness
-            if abs(self.brightness - 1.0) > 0.01:
+            if abs(adjustments['brightness'] - 1.0) > 0.01:
                 enhancer = ImageEnhance.Brightness(adjusted)
-                adjusted = enhancer.enhance(self.brightness)
+                adjusted = enhancer.enhance(adjustments['brightness'])
                 
             # apply contrast  
-            if abs(self.contrast - 1.0) > 0.01:
+            if abs(adjustments['contrast'] - 1.0) > 0.01:
                 enhancer = ImageEnhance.Contrast(adjusted)
-                adjusted = enhancer.enhance(self.contrast)
+                adjusted = enhancer.enhance(adjustments['contrast'])
                 
             # apply saturation
-            if abs(self.saturation - 1.0) > 0.01:
+            if abs(adjustments['saturation'] - 1.0) > 0.01:
                 enhancer = ImageEnhance.Color(adjusted)
-                adjusted = enhancer.enhance(self.saturation)
+                adjusted = enhancer.enhance(adjustments['saturation'])
                 
             # apply color balance
-            adjusted = self.apply_color_balance(adjusted, self.color_balance)
+            adjusted = self.apply_color_balance(adjusted, adjustments['color_balance'])
             
             # if we have a mask, composite adjusted and original based on mask
             if mask:
@@ -963,26 +1122,102 @@ class CardSelectorGUI:
             
     def reset_adjustments(self):
         """reset all adjustments to default values"""
-        self.brightness = 1.0
-        self.contrast = 1.0
-        self.saturation = 1.0
-        self.gamma = 1.0
-        self.color_balance = 0.0
+        if self.adjustment_mode == 'global':
+            # reset global settings
+            self.global_brightness = 1.0
+            self.global_contrast = 1.0
+            self.global_saturation = 1.0
+            self.global_gamma = 1.0
+            self.global_color_balance = 0.0
+        else:
+            # clear per-card overrides for current card
+            self.clear_card_overrides()
         
-        # update sliders if they exist
-        if hasattr(self, 'brightness_var'):
-            self.brightness_var.set(self.brightness)
-        if hasattr(self, 'contrast_var'):
-            self.contrast_var.set(self.contrast)
-        if hasattr(self, 'saturation_var'):
-            self.saturation_var.set(self.saturation)
-        if hasattr(self, 'gamma_var'):
-            self.gamma_var.set(self.gamma)
-        if hasattr(self, 'color_balance_var'):
-            self.color_balance_var.set(self.color_balance)
+        # update slider values and labels
+        self.update_slider_values()
+        self.update_all_labels()
             
         # refresh display
         self.refresh_image_display()
+    
+    def update_slider_values(self):
+        """update slider values to match the currently active tab"""
+        # get values based on current tab mode
+        if self.adjustment_mode == 'global':
+            # show actual global values on global tab
+            display_values = {
+                'brightness': self.global_brightness,
+                'contrast': self.global_contrast,
+                'saturation': self.global_saturation,
+                'gamma': self.global_gamma,
+                'color_balance': self.global_color_balance
+            }
+        else:
+            # show effective values (with overrides) on current card tab
+            display_values = self.get_current_adjustments()
+        
+        if hasattr(self, 'brightness_var'):
+            self.brightness_var.set(display_values['brightness'])
+            
+        if hasattr(self, 'contrast_var'):
+            self.contrast_var.set(display_values['contrast'])
+                    
+        if hasattr(self, 'saturation_var'):
+            self.saturation_var.set(display_values['saturation'])
+                    
+        if hasattr(self, 'gamma_var'):
+            self.gamma_var.set(display_values['gamma'])
+                    
+        if hasattr(self, 'color_balance_var'):
+            self.color_balance_var.set(display_values['color_balance'])
+            
+        # update labels in both tabs with their respective values
+        self.update_all_labels()
+            
+        # update override indicator
+        if hasattr(self, 'override_indicator'):
+            if self.has_card_overrides():
+                self.override_indicator.configure(text="(Card has custom settings)", foreground="blue")
+            else:
+                self.override_indicator.configure(text="(Using global settings)", foreground="gray")
+    
+    def update_all_labels(self):
+        """update all value labels in both tabs with correct values"""
+        # global tab should always show global values
+        global_values = {
+            'brightness': self.global_brightness,
+            'contrast': self.global_contrast,
+            'saturation': self.global_saturation,
+            'gamma': self.global_gamma,
+            'color_balance': self.global_color_balance
+        }
+        
+        # current card tab should show effective values (with overrides)
+        effective_values = self.get_current_adjustments()
+        
+        # update global tab labels
+        if hasattr(self, 'brightness_value_label_global'):
+            self.brightness_value_label_global.configure(text=f"{global_values['brightness']:.2f}")
+        if hasattr(self, 'contrast_value_label_global'):
+            self.contrast_value_label_global.configure(text=f"{global_values['contrast']:.2f}")
+        if hasattr(self, 'saturation_value_label_global'):
+            self.saturation_value_label_global.configure(text=f"{global_values['saturation']:.2f}")
+        if hasattr(self, 'gamma_value_label_global'):
+            self.gamma_value_label_global.configure(text=f"{global_values['gamma']:.2f}")
+        if hasattr(self, 'color_balance_value_label_global'):
+            self.color_balance_value_label_global.configure(text=f"{global_values['color_balance']:.0f}")
+            
+        # update current card tab labels
+        if hasattr(self, 'brightness_value_label_current_card'):
+            self.brightness_value_label_current_card.configure(text=f"{effective_values['brightness']:.2f}")
+        if hasattr(self, 'contrast_value_label_current_card'):
+            self.contrast_value_label_current_card.configure(text=f"{effective_values['contrast']:.2f}")
+        if hasattr(self, 'saturation_value_label_current_card'):
+            self.saturation_value_label_current_card.configure(text=f"{effective_values['saturation']:.2f}")
+        if hasattr(self, 'gamma_value_label_current_card'):
+            self.gamma_value_label_current_card.configure(text=f"{effective_values['gamma']:.2f}")
+        if hasattr(self, 'color_balance_value_label_current_card'):
+            self.color_balance_value_label_current_card.configure(text=f"{effective_values['color_balance']:.0f}")
             
     def update_card_info_display(self, printing: dict):
         """update just the card info section"""
@@ -1114,6 +1349,9 @@ class CardSelectorGUI:
                 # simple mode - just display current card directly
                 self.display_simple_current_card()
             
+            # update adjustment controls for new card
+            self.update_slider_values()
+            
     def next_card(self):
         """go to next printing"""
         if self.printings and self.current_index < len(self.printings) - 1:
@@ -1128,6 +1366,9 @@ class CardSelectorGUI:
             else:
                 # simple mode - just display current card directly
                 self.display_simple_current_card()
+                
+            # update adjustment controls for new card
+            self.update_slider_values()
                 
     def display_simple_current_card(self):
         """display the current card in simple mode without caching"""
@@ -1215,7 +1456,72 @@ class CardSelectorGUI:
         
     def create_adjustment_controls(self, parent):
         """create the adjustment control sliders and buttons"""
+        
+        # create tabs for global vs per-card adjustments
+        self.notebook = ttk.Notebook(parent)
+        self.notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        
+        # global adjustments tab
+        self.global_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(self.global_tab, text="Global Settings")
+        
+        # current card adjustments tab
+        self.card_tab = ttk.Frame(self.notebook, padding="10")
+        self.notebook.add(self.card_tab, text="Current Card")
+        
+        # bind tab change event
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+        
+        # create controls in global tab
+        self.create_adjustment_sliders(self.global_tab, mode='global')
+        
+        # create controls in card tab
+        self.create_adjustment_sliders(self.card_tab, mode='current_card')
+        
+        # configure parent column weights
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        
+    def on_tab_changed(self, event):
+        """called when user switches between global and current card tabs"""
+        selected_tab = event.widget.select()
+        tab_text = event.widget.tab(selected_tab, "text")
+        
+        if tab_text == "Global Settings":
+            self.adjustment_mode = 'global'
+        else:
+            self.adjustment_mode = 'current_card'
+            
+        # print(f"adjustment mode changed to: {self.adjustment_mode}")
+        self.update_slider_values()
+        
+    def clear_current_card_overrides(self):
+        """clear overrides for current card and switch back to global settings"""
+        self.clear_card_overrides()
+        self.update_slider_values()
+        self.update_all_labels()
+        self.refresh_image_display()
+        print(f"cleared overrides for card {self.current_index + 1}")
+        
+    def create_adjustment_sliders(self, parent, mode='global'):
+        """create the adjustment control sliders for a specific tab"""
         row = 0
+        
+        # get current adjustments at the start so it's available everywhere
+        current_adjustments = self.get_current_adjustments()
+        
+        # === MODE INDICATOR (for current card tab) ===
+        if mode == 'current_card':
+            self.override_indicator = ttk.Label(parent, text="(Using global settings)", 
+                                              font=("Arial", 9), foreground="gray")
+            self.override_indicator.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+            row += 1
+            
+            # clear overrides button for current card tab
+            clear_overrides_button = ttk.Button(parent, text="Clear Card Overrides", 
+                                               command=self.clear_current_card_overrides)
+            clear_overrides_button.grid(row=row, column=0, columnspan=2, pady=(0, 20))
+            row += 1
         
         # === SELECTION TOOLS SECTION ===
         selection_frame = ttk.LabelFrame(parent, text="Selection Tools", padding="10")
@@ -1320,49 +1626,90 @@ class CardSelectorGUI:
         # brightness control
         ttk.Label(adj_frame, text="Brightness:", font=("Arial", 10, "bold")).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
         adj_row += 1
-        self.brightness_var = tk.DoubleVar(value=self.brightness)
+        # use shared variables for both tabs (they'll be updated by update_slider_values)
+        if not hasattr(self, 'brightness_var'):
+            self.brightness_var = tk.DoubleVar(value=current_adjustments['brightness'])
+            
+        # create label for this tab and store reference
+        label_name = f'brightness_value_label_{mode}'
+        brightness_label = ttk.Label(adj_frame, text=f"{current_adjustments['brightness']:.2f}")
+        setattr(self, label_name, brightness_label)
+        
+        # also set the main label reference for the active tab
+        if mode == self.adjustment_mode or not hasattr(self, 'brightness_value_label'):
+            self.brightness_value_label = brightness_label
+        
         brightness_scale = ttk.Scale(adj_frame, from_=0.3, to=2.0, variable=self.brightness_var, 
                                    orient=tk.HORIZONTAL, length=180,
                                    command=self.on_brightness_change)
         brightness_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.brightness_value_label = ttk.Label(adj_frame, text=f"{self.brightness:.2f}")
-        self.brightness_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        brightness_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
         adj_row += 1
         
         # contrast control  
         ttk.Label(adj_frame, text="Contrast:", font=("Arial", 10, "bold")).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
         adj_row += 1
-        self.contrast_var = tk.DoubleVar(value=self.contrast)
+        if not hasattr(self, 'contrast_var'):
+            self.contrast_var = tk.DoubleVar(value=current_adjustments['contrast'])
+            
+        # create label for this tab and store reference
+        label_name = f'contrast_value_label_{mode}'
+        contrast_label = ttk.Label(adj_frame, text=f"{current_adjustments['contrast']:.2f}")
+        setattr(self, label_name, contrast_label)
+        
+        # also set the main label reference for the active tab
+        if mode == self.adjustment_mode or not hasattr(self, 'contrast_value_label'):
+            self.contrast_value_label = contrast_label
+        
         contrast_scale = ttk.Scale(adj_frame, from_=0.3, to=2.5, variable=self.contrast_var, 
                                  orient=tk.HORIZONTAL, length=180,
                                  command=self.on_contrast_change)
         contrast_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.contrast_value_label = ttk.Label(adj_frame, text=f"{self.contrast:.2f}")
-        self.contrast_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        contrast_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
         adj_row += 1
         
         # saturation control
         ttk.Label(adj_frame, text="Saturation:", font=("Arial", 10, "bold")).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
         adj_row += 1
-        self.saturation_var = tk.DoubleVar(value=self.saturation)
+        if not hasattr(self, 'saturation_var'):
+            self.saturation_var = tk.DoubleVar(value=current_adjustments['saturation'])
+            
+        # create label for this tab and store reference
+        label_name = f'saturation_value_label_{mode}'
+        saturation_label = ttk.Label(adj_frame, text=f"{current_adjustments['saturation']:.2f}")
+        setattr(self, label_name, saturation_label)
+        
+        # also set the main label reference for the active tab
+        if mode == self.adjustment_mode or not hasattr(self, 'saturation_value_label'):
+            self.saturation_value_label = saturation_label
+        
         saturation_scale = ttk.Scale(adj_frame, from_=0.0, to=2.0, variable=self.saturation_var, 
                                    orient=tk.HORIZONTAL, length=180,
                                    command=self.on_saturation_change)
         saturation_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.saturation_value_label = ttk.Label(adj_frame, text=f"{self.saturation:.2f}")
-        self.saturation_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        saturation_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
         adj_row += 1
         
         # gamma control
         ttk.Label(adj_frame, text="Gamma:", font=("Arial", 10, "bold")).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
         adj_row += 1
-        self.gamma_var = tk.DoubleVar(value=self.gamma)
+        if not hasattr(self, 'gamma_var'):
+            self.gamma_var = tk.DoubleVar(value=current_adjustments['gamma'])
+            
+        # create label for this tab and store reference
+        label_name = f'gamma_value_label_{mode}'
+        gamma_label = ttk.Label(adj_frame, text=f"{current_adjustments['gamma']:.2f}")
+        setattr(self, label_name, gamma_label)
+        
+        # also set the main label reference for the active tab
+        if mode == self.adjustment_mode or not hasattr(self, 'gamma_value_label'):
+            self.gamma_value_label = gamma_label
+        
         gamma_scale = ttk.Scale(adj_frame, from_=0.3, to=2.5, variable=self.gamma_var, 
                               orient=tk.HORIZONTAL, length=180,
                               command=self.on_gamma_change)
         gamma_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.gamma_value_label = ttk.Label(adj_frame, text=f"{self.gamma:.2f}")
-        self.gamma_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        gamma_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
         adj_row += 1
         
         # color balance control
@@ -1370,13 +1717,23 @@ class CardSelectorGUI:
         adj_row += 1
         ttk.Label(adj_frame, text="(Cool ← → Warm)", font=("Arial", 8)).grid(row=adj_row, column=0, sticky=tk.W, pady=(0, 5))
         adj_row += 1
-        self.color_balance_var = tk.DoubleVar(value=self.color_balance)
+        if not hasattr(self, 'color_balance_var'):
+            self.color_balance_var = tk.DoubleVar(value=current_adjustments['color_balance'])
+            
+        # create label for this tab and store reference
+        label_name = f'color_balance_value_label_{mode}'
+        color_balance_label = ttk.Label(adj_frame, text=f"{current_adjustments['color_balance']:.0f}")
+        setattr(self, label_name, color_balance_label)
+        
+        # also set the main label reference for the active tab
+        if mode == self.adjustment_mode or not hasattr(self, 'color_balance_value_label'):
+            self.color_balance_value_label = color_balance_label
+        
         color_balance_scale = ttk.Scale(adj_frame, from_=-100, to=100, variable=self.color_balance_var, 
                                       orient=tk.HORIZONTAL, length=180,
                                       command=self.on_color_balance_change)
         color_balance_scale.grid(row=adj_row, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        self.color_balance_value_label = ttk.Label(adj_frame, text=f"{self.color_balance:.0f}")
-        self.color_balance_value_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
+        color_balance_label.grid(row=adj_row, column=1, padx=(10, 0), pady=(0, 10))
         adj_row += 1
         
         # separator
@@ -1388,14 +1745,18 @@ class CardSelectorGUI:
         reset_button.grid(row=adj_row, column=0, columnspan=2, pady=(0, 10))
         adj_row += 1
         
-        # tips label
-        tips_text = "Tips for MTG cards:\n• Increase contrast for borders\n• Adjust gamma for text areas\n• Warm colors for older sets\n• Cool colors for modern sets"
+        # tips label - different text for global vs current card
+        if mode == 'global':
+            tips_text = "Global settings apply to all cards by default.\nTips:\n• Use Smart Fix for auto correction\n• Adjust contrast for borders\n• Warm colors for older sets"
+        else:
+            tips_text = "Current card settings override global ones.\nTips:\n• Smart Fix works here too\n• Use selection tools for precise edits\n• Clear overrides to use global settings"
+        
         tips_label = ttk.Label(adj_frame, text=tips_text, font=("Arial", 9), justify=tk.LEFT, 
                               foreground="gray", wraplength=200)
         tips_label.grid(row=adj_row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(20, 0))
         
-        # configure column weights  
-        parent.columnconfigure(0, weight=1)
+        # configure column weights for adjustment frame
+        adj_frame.columnconfigure(0, weight=1)
         
     def select_all(self):
         """select entire image"""
@@ -1652,11 +2013,11 @@ class CardSelectorGUI:
             print(f"Issues detected: {issues}")
             
             # reset to default adjustments first
-            self.brightness = 1.0
-            self.contrast = 1.0
-            self.saturation = 1.0
-            self.gamma = 1.0
-            self.color_balance = 0.0
+            brightness = 1.0
+            contrast = 1.0
+            saturation = 1.0
+            gamma = 1.0
+            color_balance = 0.0
             
             # create smart selection mask
             smart_mask = None
@@ -1669,61 +2030,53 @@ class CardSelectorGUI:
                 smart_mask = self.combine_masks(smart_mask, frame_mask)
                 
                 # apply corrections for frame areas
-                self.brightness = 0.8  # darken
-                self.contrast = 1.3    # increase contrast
-                self.gamma = 0.9       # adjust midtones
+                brightness = 0.8  # darken
+                contrast = 1.3    # increase contrast
+                gamma = 0.9       # adjust midtones
                 adjustments_applied.append("frame areas darkened")
                 
             # fix color temperature
             if issues['color_cast'] == 'warm':
                 print("Correcting warm color cast...")
-                self.color_balance = -25  # cool it down
+                color_balance = -25  # cool it down
                 adjustments_applied.append("cooled color temperature")
                 
             elif issues['color_cast'] == 'cool':
                 print("Correcting cool color cast...")
-                self.color_balance = 15   # warm it up
+                color_balance = 15   # warm it up
                 adjustments_applied.append("warmed color temperature")
                 
             # fix overall brightness issues
             if issues['overall_too_dark']:
                 print("Brightening overall image...")
-                self.brightness = max(self.brightness, 1.2)
+                brightness = max(brightness, 1.2)
                 adjustments_applied.append("brightened image")
                 
             elif issues['overall_too_bright']:
                 print("Darkening overall image...")
-                self.brightness = min(self.brightness, 0.85)
+                brightness = min(brightness, 0.85)
                 adjustments_applied.append("darkened image")
                 
             # fix low contrast
             if issues['low_contrast']:
                 print("Boosting contrast...")
-                self.contrast = max(self.contrast, 1.4)
+                contrast = max(contrast, 1.4)
                 adjustments_applied.append("boosted contrast")
                 
             # enhance saturation if colors are washed out
             if issues['text_box_washed_out'] or issues['overall_too_bright']:
                 print("Enhancing color saturation...")
-                self.saturation = 1.15
+                saturation = 1.15
                 adjustments_applied.append("enhanced saturation")
                 
-            # update slider values
-            if hasattr(self, 'brightness_var'):
-                self.brightness_var.set(self.brightness)
-                self.brightness_value_label.configure(text=f"{self.brightness:.2f}")
-            if hasattr(self, 'contrast_var'):
-                self.contrast_var.set(self.contrast)  
-                self.contrast_value_label.configure(text=f"{self.contrast:.2f}")
-            if hasattr(self, 'saturation_var'):
-                self.saturation_var.set(self.saturation)
-                self.saturation_value_label.configure(text=f"{self.saturation:.2f}")
-            if hasattr(self, 'gamma_var'):
-                self.gamma_var.set(self.gamma)
-                self.gamma_value_label.configure(text=f"{self.gamma:.2f}")
-            if hasattr(self, 'color_balance_var'):
-                self.color_balance_var.set(self.color_balance)
-                self.color_balance_value_label.configure(text=f"{self.color_balance:.0f}")
+            # apply the new adjustment values
+            self.set_current_adjustments(brightness=brightness, contrast=contrast, 
+                                       saturation=saturation, gamma=gamma, 
+                                       color_balance=color_balance)
+            
+            # update slider values and labels
+            self.update_slider_values()
+            self.update_all_labels()
                 
             # apply smart mask if we created one
             if smart_mask:
@@ -1791,33 +2144,56 @@ class CardSelectorGUI:
 
     def on_brightness_change(self, value):
         """called when brightness slider changes"""
-        self.brightness = float(value)
-        self.brightness_value_label.configure(text=f"{self.brightness:.2f}")
+        brightness = float(value)
+        self.set_current_adjustments(brightness=brightness)
+        self.update_all_labels()  # update both tabs' labels
+        if hasattr(self, 'override_indicator'):
+            self.update_override_indicator()
         self.refresh_image_display()
         
     def on_contrast_change(self, value):
         """called when contrast slider changes"""
-        self.contrast = float(value)
-        self.contrast_value_label.configure(text=f"{self.contrast:.2f}")
+        contrast = float(value)
+        self.set_current_adjustments(contrast=contrast)
+        self.update_all_labels()  # update both tabs' labels
+        if hasattr(self, 'override_indicator'):
+            self.update_override_indicator()
         self.refresh_image_display()
         
     def on_saturation_change(self, value):
         """called when saturation slider changes"""
-        self.saturation = float(value)
-        self.saturation_value_label.configure(text=f"{self.saturation:.2f}")
+        saturation = float(value)
+        self.set_current_adjustments(saturation=saturation)
+        self.update_all_labels()  # update both tabs' labels
+        if hasattr(self, 'override_indicator'):
+            self.update_override_indicator()
         self.refresh_image_display()
         
     def on_gamma_change(self, value):
         """called when gamma slider changes"""
-        self.gamma = float(value)
-        self.gamma_value_label.configure(text=f"{self.gamma:.2f}")
+        gamma = float(value)
+        self.set_current_adjustments(gamma=gamma)
+        self.update_all_labels()  # update both tabs' labels
+        if hasattr(self, 'override_indicator'):
+            self.update_override_indicator()
         self.refresh_image_display()
         
     def on_color_balance_change(self, value):
         """called when color balance slider changes"""
-        self.color_balance = float(value)
-        self.color_balance_value_label.configure(text=f"{self.color_balance:.0f}")
+        color_balance = float(value)
+        self.set_current_adjustments(color_balance=color_balance)
+        self.update_all_labels()  # update both tabs' labels
+        if hasattr(self, 'override_indicator'):
+            self.update_override_indicator()
         self.refresh_image_display()
+    
+    def update_override_indicator(self):
+        """update the override indicator text"""
+        if hasattr(self, 'override_indicator'):
+            if self.has_card_overrides():
+                self.override_indicator.configure(text="(Card has custom settings)", foreground="blue")
+            else:
+                self.override_indicator.configure(text="(Using global settings)", foreground="gray")
         
     def get_image_coordinates(self, event, is_front=True):
         """convert screen coordinates to image coordinates"""
@@ -2146,6 +2522,9 @@ class CardSelectorGUI:
             
             # === ADJUSTMENT CONTROLS ===
             self.create_adjustment_controls(controls_frame)
+            
+            # initialize slider values after controls are created
+            self.update_slider_values()
             
             # keyboard bindings
             self.root.bind('<Left>', lambda e: self.previous_card())
