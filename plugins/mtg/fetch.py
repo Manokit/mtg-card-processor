@@ -7,8 +7,10 @@ from url_fetcher import DeckURLFetcher
 
 from typing import Set
 
-front_directory = os.path.join('game', 'front')
-double_sided_directory = os.path.join('game', 'double_sided')
+# Get the project root directory (two levels up from plugins/mtg/)
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+front_directory = os.path.join(project_root, 'game', 'front')
+double_sided_directory = os.path.join(project_root, 'game', 'double_sided')
 
 @click.command()
 @click.argument('deck_source')
