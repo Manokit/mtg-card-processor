@@ -59,30 +59,59 @@ def fetch_card_art(
             
     else:
         # no adjustments - use original scryfall download method
-        # Query for the front side
-        card_front_image_query = f'https://api.scryfall.com/cards/{card_set}/{card_collector_number}/?format=image&version=png'
-        card_art = request_scryfall(card_front_image_query).content
-        if card_art is not None:
-
-            # Save image based on quantity
-            for counter in range(quantity):
-                image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
-
-                with open(image_path, 'wb') as f:
-                    f.write(card_art)
+        # Get card info to access direct image URLs
+        card_info_query = f'https://api.scryfall.com/cards/{card_set}/{card_collector_number}'
+        card_json = request_scryfall(card_info_query).json()
+        
+        # Use the highest resolution PNG image from the card data
+        if layout in double_sided_layouts and 'card_faces' in card_json and len(card_json['card_faces']) > 0:
+            # For double-sided cards, get the front face from card_faces
+            front_face = card_json['card_faces'][0]
+            if 'image_uris' in front_face and 'png' in front_face['image_uris']:
+                front_image_url = front_face['image_uris']['png']
+                card_art = request_scryfall(front_image_url).content
+                if card_art is not None:
+                    # Save image based on quantity
+                    for counter in range(quantity):
+                        image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+                        with open(image_path, 'wb') as f:
+                            f.write(card_art)
+        elif 'image_uris' in card_json and 'png' in card_json['image_uris']:
+            # For single-sided cards, use the main image_uris
+            front_image_url = card_json['image_uris']['png']
+            card_art = request_scryfall(front_image_url).content
+            if card_art is not None:
+                # Save image based on quantity
+                for counter in range(quantity):
+                    image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+                    with open(image_path, 'wb') as f:
+                        f.write(card_art)
 
         # Get backside of card, if it exists
         if layout in double_sided_layouts:
-            card_back_image_query = f'{card_front_image_query}&face=back'
-            card_art = request_scryfall(card_back_image_query).content
-            if card_art is not None:
-
-                # Save image based on quantity
-                for counter in range(quantity):
-                    image_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
-
-                    with open(image_path, 'wb') as f:
-                        f.write(card_art)
+            # For double-sided cards, we need to get the back face image
+            if 'card_faces' in card_json and len(card_json['card_faces']) > 1:
+                # For modal double-faced cards, the second face is the back
+                back_face = card_json['card_faces'][1]
+                if 'image_uris' in back_face and 'png' in back_face['image_uris']:
+                    back_image_url = back_face['image_uris']['png']
+                    card_art = request_scryfall(back_image_url).content
+                    if card_art is not None:
+                        # Save image based on quantity
+                        for counter in range(quantity):
+                            image_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+                            with open(image_path, 'wb') as f:
+                                f.write(card_art)
+            else:
+                # Fallback to the old method for cards that don't have card_faces
+                card_back_image_query = f'https://api.scryfall.com/cards/{card_set}/{card_collector_number}/?format=image&version=png&face=back'
+                card_art = request_scryfall(card_back_image_query).content
+                if card_art is not None:
+                    # Save image based on quantity
+                    for counter in range(quantity):
+                        image_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+                        with open(image_path, 'wb') as f:
+                            f.write(card_art)
 
 def remove_nonalphanumeric(s: str) -> str:
     return re.sub(r'[^\w]', '', s)
@@ -243,114 +272,109 @@ def fetch_card_with_gui(
     """
     fetch card with gui selection, returns true if card was selected and downloaded
     """
-    if not ignore_set_and_collector_number and card_set != "" and card_collector_number != "":
-        # if we have specific set/collector number, just fetch that directly
-        card_info_query = f"https://api.scryfall.com/cards/{card_set}/{card_collector_number}"
-        card_json = request_scryfall(card_info_query).json()
-        
-        fetch_card_art(
-            index, quantity, remove_nonalphanumeric(card_json['name']), 
-            card_set, card_collector_number, card_json['layout'], 
-            front_img_dir, double_sided_dir
-        )
-        return True
-    else:
-        if name == "":
-            return False
+    # Note: When GUI is enabled, we always show the GUI for selection,
+    # but we can pre-select the specific printing if we have set/collector info
+    
+    # Store preferred printing info for GUI pre-selection
+    preferred_set = card_set if card_set and card_set != "" else None
+    preferred_collector_number = card_collector_number if card_collector_number and card_collector_number != "" else None
+    if name == "":
+        return False
 
-        # get card info and all printings - use front face name for double-sided cards
-        front_face_name = extract_front_face_name(name)
-        
-        # debug output for double-sided cards
+    # get card info and all printings - use front face name for double-sided cards
+    front_face_name = extract_front_face_name(name)
+    
+    # debug output for double-sided cards
+    if '//' in name:
+        print(f'double-sided card detected: "{name}" -> searching for: "{front_face_name}"')
+    
+    # try exact search first, then fuzzy search for double-sided cards
+    encoded_name = quote(front_face_name)
+    card_info_query = f'https://api.scryfall.com/cards/named?exact={encoded_name}'
+    
+    try:
+        print(f'searching scryfall for: {card_info_query}')
+        card_json = request_scryfall(card_info_query).json()
+    except Exception as e:
+        # if exact search fails and this is a double-sided card, try fuzzy search
         if '//' in name:
-            print(f'double-sided card detected: "{name}" -> searching for: "{front_face_name}"')
-        
-        # try exact search first, then fuzzy search for double-sided cards
-        encoded_name = quote(front_face_name)
-        card_info_query = f'https://api.scryfall.com/cards/named?exact={encoded_name}'
-        
-        try:
-            print(f'searching scryfall for: {card_info_query}')
-            card_json = request_scryfall(card_info_query).json()
-        except Exception as e:
-            # if exact search fails and this is a double-sided card, try fuzzy search
-            if '//' in name:
-                print(f'exact search failed for double-sided card, trying fuzzy search...')
-                fuzzy_query = f'https://api.scryfall.com/cards/named?fuzzy={encoded_name}'
-                try:
-                    print(f'fuzzy searching scryfall for: {fuzzy_query}')
-                    card_json = request_scryfall(fuzzy_query).json()
-                except Exception as e2:
-                    print(f'fuzzy search also failed for "{front_face_name}": {e2}')
-                    print(f'original card name was: "{name}"')
-                    return False
-            else:
-                print(f'failed to find card "{front_face_name}": {e}')
+            print(f'exact search failed for double-sided card, trying fuzzy search...')
+            fuzzy_query = f'https://api.scryfall.com/cards/named?fuzzy={encoded_name}'
+            try:
+                print(f'fuzzy searching scryfall for: {fuzzy_query}')
+                card_json = request_scryfall(fuzzy_query).json()
+            except Exception as e2:
+                print(f'fuzzy search also failed for "{front_face_name}": {e2}')
                 print(f'original card name was: "{name}"')
                 return False
-
-        # get all available printings
-        prints_search_json = request_scryfall(card_json['prints_search_uri']).json()
-        card_printings = prints_search_json['data']
-        print(f'found {len(card_printings)} total printings for "{name}"')
-
-        # filter out digital-only and invalid printings
-        valid_printings = []
-        for printing in card_printings:
-            # check for images - they can be on the main card or on card faces for double-sided cards
-            has_image = False
-            
-            if 'image_uris' in printing and 'normal' in printing['image_uris']:
-                has_image = True
-            elif 'card_faces' in printing:
-                # check if any face has an image
-                for face in printing['card_faces']:
-                    if 'image_uris' in face and 'normal' in face['image_uris']:
-                        has_image = True
-                        break
-            
-            if not has_image:
-                continue
-                
-            valid_printings.append(printing)
-
-        print(f'found {len(valid_printings)} valid printings after filtering')
-        
-        if not valid_printings:
-            print(f'no valid printings found for "{name}"')
+        else:
+            print(f'failed to find card "{front_face_name}": {e}')
+            print(f'original card name was: "{name}"')
             return False
 
-        # show gui selection dialog (use original name for display)
-        selected_printing = gui.show_selection_dialog(name, valid_printings)
-        
-        if selected_printing is None:
-            print(f'no printing selected for "{name}"')
-            return False
+    # get all available printings
+    prints_search_json = request_scryfall(card_json['prints_search_uri']).json()
+    card_printings = prints_search_json['data']
+    print(f'found {len(card_printings)} total printings for "{name}"')
 
-        # fetch the selected card art
-        # use the actual card name from scryfall for file naming
-        actual_card_name = remove_nonalphanumeric(selected_printing['name'])
+    # filter out digital-only and invalid printings
+    valid_printings = []
+    for printing in card_printings:
+        # check for images - they can be on the main card or on card faces for double-sided cards
+        has_image = False
         
-        # extract adjusted images if they exist
-        adjusted_images = {}
-        if 'adjusted_image' in selected_printing:
-            adjusted_images['adjusted_image'] = selected_printing['adjusted_image']
-        if 'adjusted_front_image' in selected_printing:
-            adjusted_images['adjusted_front_image'] = selected_printing['adjusted_front_image'] 
-            adjusted_images['adjusted_back_image'] = selected_printing['adjusted_back_image']
+        if 'image_uris' in printing and 'normal' in printing['image_uris']:
+            has_image = True
+        elif 'card_faces' in printing:
+            # check if any face has an image
+            for face in printing['card_faces']:
+                if 'image_uris' in face and 'normal' in face['image_uris']:
+                    has_image = True
+                    break
+        
+        if not has_image:
+            continue
             
-        fetch_card_art(
-            index,
-            quantity,
-            actual_card_name,
-            selected_printing['set'],
-            selected_printing['collector_number'],
-            selected_printing['layout'],
-            front_img_dir,
-            double_sided_dir,
-            adjusted_images if adjusted_images else None
-        )
-        return True
+        valid_printings.append(printing)
+
+    print(f'found {len(valid_printings)} valid printings after filtering')
+    
+    if not valid_printings:
+        print(f'no valid printings found for "{name}"')
+        return False
+
+    # show gui selection dialog (use original name for display)
+    # pass preferred printing info to pre-select the specific printing from URL/deck
+    selected_printing = gui.show_selection_dialog(name, valid_printings, preferred_set, preferred_collector_number)
+    
+    if selected_printing is None:
+        print(f'no printing selected for "{name}"')
+        return False
+
+    # fetch the selected card art
+    # use the actual card name from scryfall for file naming
+    actual_card_name = remove_nonalphanumeric(selected_printing['name'])
+    
+    # extract adjusted images if they exist
+    adjusted_images = {}
+    if 'adjusted_image' in selected_printing:
+        adjusted_images['adjusted_image'] = selected_printing['adjusted_image']
+    if 'adjusted_front_image' in selected_printing:
+        adjusted_images['adjusted_front_image'] = selected_printing['adjusted_front_image'] 
+        adjusted_images['adjusted_back_image'] = selected_printing['adjusted_back_image']
+        
+    fetch_card_art(
+        index,
+        quantity,
+        actual_card_name,
+        selected_printing['set'],
+        selected_printing['collector_number'],
+        selected_printing['layout'],
+        front_img_dir,
+        double_sided_dir,
+        adjusted_images if adjusted_images else None
+    )
+    return True
 
 def get_handle_card(
     ignore_set_and_collector_number: bool,
