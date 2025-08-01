@@ -2408,12 +2408,25 @@ class CardSelectorGUI:
                         # if parsing fails, just keep current position
                         pass
         
-    def show_selection_dialog(self, card_name: str, printings: list) -> dict:
+    def show_selection_dialog(self, card_name: str, printings: list, preferred_set: str = None, preferred_collector_number: str = None) -> dict:
         """show gui for selecting card printing, returns selected printing or none"""
         try:
             print(f"initializing gui for card: {card_name}")
             self.printings = printings
+            
+            # try to find and pre-select the preferred printing if specified
             self.current_index = 0
+            if preferred_set and preferred_collector_number:
+                print(f"looking for preferred printing: {preferred_set} #{preferred_collector_number}")
+                for i, printing in enumerate(printings):
+                    if (printing.get('set', '').upper() == preferred_set.upper() and 
+                        printing.get('collector_number', '') == preferred_collector_number):
+                        self.current_index = i
+                        print(f"found preferred printing at index {i}: {printing.get('set')} #{printing.get('collector_number')}")
+                        break
+                else:
+                    print(f"preferred printing {preferred_set} #{preferred_collector_number} not found, starting with first available")
+            
             self.selected_printing = None
             
             # reset per-dialog loading state (but keep global cache!)
@@ -2578,7 +2591,7 @@ class CardSelectorGUI:
                             print(f"using simple mode with caching... (cache: {cache_count} images)")
                         else:
                             print("using simple mode (no caching)...")
-                        printing = self.printings[0]
+                        printing = self.printings[self.current_index]
                         self.display_simple_first_card(printing)
                         print("simple mode setup complete")
                         
