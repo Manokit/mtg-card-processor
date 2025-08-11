@@ -32,7 +32,8 @@ def fetch_card_art(
 
     front_img_dir: str,
     double_sided_dir: str,
-    adjusted_images: dict = None
+    adjusted_images: dict = None,
+    is_borderless: bool = False
 ) -> None:
     from PIL import Image
     
@@ -40,7 +41,8 @@ def fetch_card_art(
         # single card with adjustments - use adjusted image
         adjusted_image = adjusted_images['adjusted_image']
         for counter in range(quantity):
-            image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+            borderless_tag = '_borderless' if is_borderless else ''
+            image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{borderless_tag}{str(counter + 1)}.png')
             adjusted_image.save(image_path, 'PNG')
             
     elif adjusted_images and 'adjusted_front_image' in adjusted_images:
@@ -49,12 +51,13 @@ def fetch_card_art(
         adjusted_back = adjusted_images['adjusted_back_image']
         
         for counter in range(quantity):
+            borderless_tag = '_borderless' if is_borderless else ''
             # save front image
-            front_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+            front_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{borderless_tag}{str(counter + 1)}.png')
             adjusted_front.save(front_path, 'PNG')
             
             # save back image
-            back_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+            back_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{borderless_tag}{str(counter + 1)}.png')
             adjusted_back.save(back_path, 'PNG')
             
     else:
@@ -73,7 +76,8 @@ def fetch_card_art(
                 if card_art is not None:
                     # Save image based on quantity
                     for counter in range(quantity):
-                        image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+                        borderless_tag = '_borderless' if is_borderless else ''
+                        image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{borderless_tag}{str(counter + 1)}.png')
                         with open(image_path, 'wb') as f:
                             f.write(card_art)
         elif 'image_uris' in card_json and 'png' in card_json['image_uris']:
@@ -83,7 +87,8 @@ def fetch_card_art(
             if card_art is not None:
                 # Save image based on quantity
                 for counter in range(quantity):
-                    image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+                    borderless_tag = '_borderless' if is_borderless else ''
+                    image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{borderless_tag}{str(counter + 1)}.png')
                     with open(image_path, 'wb') as f:
                         f.write(card_art)
 
@@ -99,7 +104,8 @@ def fetch_card_art(
                     if card_art is not None:
                         # Save image based on quantity
                         for counter in range(quantity):
-                            image_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+                            borderless_tag = '_borderless' if is_borderless else ''
+                            image_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{borderless_tag}{str(counter + 1)}.png')
                             with open(image_path, 'wb') as f:
                                 f.write(card_art)
             else:
@@ -109,7 +115,8 @@ def fetch_card_art(
                 if card_art is not None:
                     # Save image based on quantity
                     for counter in range(quantity):
-                        image_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{str(counter + 1)}.png')
+                        borderless_tag = '_borderless' if is_borderless else ''
+                        image_path = os.path.join(double_sided_dir, f'{str(index)}{clean_card_name}{borderless_tag}{str(counter + 1)}.png')
                         with open(image_path, 'wb') as f:
                             f.write(card_art)
 
@@ -174,7 +181,10 @@ def fetch_card(
         # Query for card info
         card_json = request_scryfall(card_info_query).json()
 
-        fetch_card_art(index, quantity, remove_nonalphanumeric(card_json['name']), card_set, card_collector_number, card_json['layout'], front_img_dir, double_sided_dir)
+        # check if card is borderless
+        is_borderless = card_json.get('border_color') == 'borderless'
+        
+        fetch_card_art(index, quantity, remove_nonalphanumeric(card_json['name']), card_set, card_collector_number, card_json['layout'], front_img_dir, double_sided_dir, is_borderless=is_borderless)
 
     else:
         if name == "":
@@ -244,6 +254,14 @@ def fetch_card(
 
         # Fetch card art - use cleaned name for file naming
         clear_card_name = remove_nonalphanumeric(card_json['name'])
+        
+        # check if the selected card is borderless  
+        is_borderless = False
+        if len(filtered_printings) > 0:
+            is_borderless = filtered_printings[0].get('border_color') == 'borderless'
+        else:
+            is_borderless = card_json.get('border_color') == 'borderless'
+        
         fetch_card_art(
             index,
             quantity,
@@ -252,7 +270,8 @@ def fetch_card(
             collector_number,
             card_json['layout'],
             front_img_dir,
-            double_sided_dir
+            double_sided_dir,
+            is_borderless=is_borderless
         )
 
 def fetch_card_with_gui(
@@ -355,6 +374,9 @@ def fetch_card_with_gui(
     # use the actual card name from scryfall for file naming
     actual_card_name = remove_nonalphanumeric(selected_printing['name'])
     
+    # check if selected card is borderless
+    is_borderless = selected_printing.get('border_color') == 'borderless'
+    
     # extract adjusted images if they exist
     adjusted_images = {}
     if 'adjusted_image' in selected_printing:
@@ -372,7 +394,8 @@ def fetch_card_with_gui(
         selected_printing['layout'],
         front_img_dir,
         double_sided_dir,
-        adjusted_images if adjusted_images else None
+        adjusted_images if adjusted_images else None,
+        is_borderless=is_borderless
     )
     return True
 

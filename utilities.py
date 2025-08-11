@@ -221,7 +221,9 @@ def draw_card_layout(
     crop: tuple[float, float],
     ppi_ratio: float,
     extend_corners: int,
-    flip: bool
+    extend_corners_exclude_borderless: bool,
+    flip: bool,
+    card_filenames: List[str] = None
 ):
     num_cards = num_rows * num_cols
 
@@ -257,8 +259,16 @@ def draw_card_layout(
         # Resize the image to normalize extend_corners
         card_image = card_image.resize((math.floor(width * ppi_ratio), math.floor(height * ppi_ratio)))
 
-        extend_corners_ppi = math.floor(extend_corners * ppi_ratio)
-        card_image = card_image.crop((extend_corners_ppi, extend_corners_ppi, card_image.width - extend_corners_ppi, card_image.height - extend_corners_ppi))
+        # check if this card is borderless and should skip extend_corners
+        is_borderless = False
+        if extend_corners_exclude_borderless and card_filenames and i < len(card_filenames):
+            is_borderless = '_borderless' in card_filenames[i]
+        
+        # apply extend_corners only if card is not borderless or if we're not excluding borderless
+        extend_corners_ppi = 0
+        if extend_corners > 0 and not is_borderless:
+            extend_corners_ppi = math.floor(extend_corners * ppi_ratio)
+            card_image = card_image.crop((extend_corners_ppi, extend_corners_ppi, card_image.width - extend_corners_ppi, card_image.height - extend_corners_ppi))
 
         draw_card_with_bleed(
             card_image,
@@ -299,6 +309,7 @@ def generate_pdf(
     only_fronts: bool,
     crop_string: str | None,
     extend_corners: int,
+    extend_corners_exclude_borderless: bool,
     ppi: int,
     quality: int,
     skip_indices: List[int],
@@ -435,7 +446,9 @@ def generate_pdf(
                         (0, 0),
                         ppi_ratio,
                         extend_corners,
-                        flip=not no_flip_backs
+                        extend_corners_exclude_borderless,
+                        flip=not no_flip_backs,
+                        card_filenames=None  # back cards don't need borderless detection
                     )
 
             # Create single-sided card layout
@@ -446,12 +459,14 @@ def generate_pdf(
                 if not file_group:
                     break
 
-                # Fetch card art
+                # Fetch card art and track filenames
                 front_card_images = []
+                front_card_filenames = []
                 file_group_iterator = iter(file_group)
                 for i in range(num_cards):
                     if i in clean_skip_indices:
                         front_card_images.append(None)
+                        front_card_filenames.append(None)
                         continue
 
                     try:
@@ -466,6 +481,7 @@ def generate_pdf(
                     front_image = Image.open(front_image_path)
                     front_image = ImageOps.exif_transpose(front_image)
                     front_card_images.append(front_image)
+                    front_card_filenames.append(file)
 
                 single_sided_front_page = reg_im.copy()
 
@@ -483,7 +499,9 @@ def generate_pdf(
                     crop,
                     ppi_ratio,
                     extend_corners,
-                    flip=False
+                    extend_corners_exclude_borderless,
+                    flip=False,
+                    card_filenames=front_card_filenames
                 )
 
                 add_front_back_pages(
@@ -505,14 +523,16 @@ def generate_pdf(
                 if not file_group:
                     break
 
-                # Fetch card art
+                # Fetch card art and track filenames
                 front_card_images = []
                 back_card_images = []
+                ds_card_filenames = []
                 file_group_iterator = iter(file_group)
                 for i in range(num_cards):
                     if i in clean_skip_indices:
                         front_card_images.append(None)
                         back_card_images.append(None)
+                        ds_card_filenames.append(None)
                         continue
 
                     try:
@@ -532,6 +552,7 @@ def generate_pdf(
                     ds_image = Image.open(ds_image_path)
                     ds_image = ImageOps.exif_transpose(ds_image)
                     back_card_images.append(ds_image)
+                    ds_card_filenames.append(file)
 
                 double_sided_front_page = reg_im.copy()
                 double_sided_back_page = reg_im.copy()
@@ -550,7 +571,9 @@ def generate_pdf(
                     crop,
                     ppi_ratio,
                     extend_corners,
-                    flip=False
+                    extend_corners_exclude_borderless,
+                    flip=False,
+                    card_filenames=ds_card_filenames
                 )
 
                 # Create back layout for double-sided cards
@@ -567,7 +590,9 @@ def generate_pdf(
                     crop,
                     ppi_ratio,
                     extend_corners,
-                    flip=not no_flip_backs
+                    extend_corners_exclude_borderless,
+                    flip=not no_flip_backs,
+                    card_filenames=ds_card_filenames
                 )
 
                 # Add the front and back layouts
