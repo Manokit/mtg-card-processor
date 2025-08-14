@@ -591,7 +591,7 @@ def generate_pdf(
                     ppi_ratio,
                     extend_corners,
                     extend_corners_exclude_borderless,
-                    flip=not no_flip_backs,
+                    flip=True,
                     card_filenames=ds_card_filenames
                 )
 
