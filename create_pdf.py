@@ -65,6 +65,8 @@ def select_deck_interactively():
 @click.option("--skip", type=click.IntRange(min=0), multiple=True, help="Skip a card based on its index. Useful for registration issues. Examples: 0, 4.")
 @click.option("--name", help="Label each page of the PDF with a name.")
 @click.option("--no_flip_backs", default=False, is_flag=True, help="Don't flip single-sided backs 180 degrees. Double-sided backs are always flipped. Use for manual printing where you physically flip the paper.")
+@click.option("--modded", default=False, is_flag=True, help="Drop the bottom 4 card backs by 7 pixels to match modified Silhouette cutting template.")
+@click.option("--seven_cards", default=False, is_flag=True, help="Use only 7 cards per page by skipping the bottom left position for better cutting machine registration.")
 @click.version_option("1.4.0")
 
 def cli(
@@ -86,7 +88,9 @@ def cli(
     skip,
     load_offset,
     name,
-    no_flip_backs
+    no_flip_backs,
+    modded,
+    seven_cards
 ):
     # apply preferred settings if --preferred flag is used
     if preferred:
@@ -146,7 +150,9 @@ def cli(
         skip,
         load_offset,
         name,
-        no_flip_backs
+        no_flip_backs,
+        modded,
+        seven_cards
     )
 
 if __name__ == '__main__':

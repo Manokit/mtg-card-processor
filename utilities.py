@@ -223,7 +223,9 @@ def draw_card_layout(
     extend_corners: int,
     extend_corners_exclude_borderless: bool,
     flip: bool,
-    card_filenames: List[str] = None
+    card_filenames: List[str] = None,
+    modded: bool = False,
+    is_back: bool = False
 ):
     num_cards = num_rows * num_cols
 
@@ -241,6 +243,15 @@ def draw_card_layout(
 
             # Rotate the back image to account for orientation
             card_image = card_image.rotate(180)
+
+        # apply modded offset for bottom 4 card backs only
+        if modded and is_back and num_rows >= 2:
+            card_row = (i % num_cards) // num_cols
+            if flip:
+                card_row = num_rows - card_row - 1
+            # if this is the bottom row (last row), apply 7-pixel offset
+            if card_row == num_rows - 1:
+                new_origin_y += math.floor(7 * ppi_ratio)
 
         # Crop the outer portion of a card to remove preexisting print bleed
         crop_x_percent, crop_y_percent = crop
@@ -315,7 +326,9 @@ def generate_pdf(
     skip_indices: List[int],
     load_offset: bool,
     name: str,
-    no_flip_backs: bool
+    no_flip_backs: bool,
+    modded: bool,
+    seven_cards: bool
 ):
     # Sanity checks for the different directories
     f_path = Path(front_dir_path)
@@ -399,6 +412,13 @@ def generate_pdf(
         clean_skip_indices = [n for n in skip_indices if n < num_cards]
         ignore_skip_indices = [n for n in skip_indices if n >= num_cards]
 
+        # add bottom left position to skip indices if seven_cards is enabled
+        if seven_cards and num_rows >= 2:
+            bottom_left_index = num_cols  # first card in second row
+            if bottom_left_index < num_cards and bottom_left_index not in clean_skip_indices:
+                clean_skip_indices.append(bottom_left_index)
+                print(f'7-cards mode: automatically skipping bottom left position (index {bottom_left_index})')
+
         if len(ignore_skip_indices) > 0:
             print(f'Ignoring skip indices that are outside range 0-{num_cards - 1}: {ignore_skip_indices}')
 
@@ -418,6 +438,9 @@ def generate_pdf(
 
             # Create the array that will store the filled templates
             pages: List[Image.Image] = []
+            # track which pages are backs and which backs belong to double-sided cards
+            page_is_back: List[bool] = []
+            page_is_dfc_back: List[bool] = []
 
             max_print_bleed = calculate_max_print_bleed(card_layout.x_pos, card_layout.y_pos, card_layout_size.width, card_layout_size.height)
 
@@ -448,7 +471,9 @@ def generate_pdf(
                         extend_corners,
                         extend_corners_exclude_borderless,
                         flip=not no_flip_backs,
-                        card_filenames=None  # back cards don't need borderless detection
+                        card_filenames=None,  # back cards don't need borderless detection
+                        modded=modded,
+                        is_back=True
                     )
 
             # Create single-sided card layout
@@ -501,7 +526,9 @@ def generate_pdf(
                     extend_corners,
                     extend_corners_exclude_borderless,
                     flip=False,
-                    card_filenames=front_card_filenames
+                    card_filenames=front_card_filenames,
+                    modded=modded,
+                    is_back=False
                 )
 
                 add_front_back_pages(
@@ -515,6 +542,12 @@ def generate_pdf(
                     only_fronts,
                     name
                 )
+                # record page metadata // fronts then (optional) backs
+                page_is_back.append(False)
+                page_is_dfc_back.append(False)
+                if not only_fronts:
+                    page_is_back.append(True)
+                    page_is_dfc_back.append(False)
 
             # Create double-sided card layout
             it = iter(natsorted(list(ds_set)))
@@ -573,7 +606,9 @@ def generate_pdf(
                     extend_corners,
                     extend_corners_exclude_borderless,
                     flip=False,
-                    card_filenames=ds_card_filenames
+                    card_filenames=ds_card_filenames,
+                    modded=modded,
+                    is_back=False
                 )
 
                 # Create back layout for double-sided cards
@@ -592,7 +627,9 @@ def generate_pdf(
                     extend_corners,
                     extend_corners_exclude_borderless,
                     flip=True,
-                    card_filenames=ds_card_filenames
+                    card_filenames=ds_card_filenames,
+                    modded=modded,
+                    is_back=True
                 )
 
                 # Add the front and back layouts
@@ -607,6 +644,11 @@ def generate_pdf(
                     False,
                     name
                 )
+                # record page metadata // double-sided always adds a back
+                page_is_back.append(False)
+                page_is_dfc_back.append(False)
+                page_is_back.append(True)
+                page_is_dfc_back.append(True)
 
             if len(pages) == 0:
                 print('No pages were generated')
@@ -620,7 +662,22 @@ def generate_pdf(
                     print('Offset cannot be applied')
                 else:
                     print(f'Loaded x offset: {saved_offset.x_offset}, y offset: {saved_offset.y_offset}')
-                    pages = offset_images(pages, saved_offset.x_offset, saved_offset.y_offset, ppi)
+                    # apply per-page offsets: fronts unchanged; backs shifted
+                    dx = math.floor(saved_offset.x_offset * ppi / 300)
+                    dy = math.floor(saved_offset.y_offset * ppi / 300)
+                    new_pages: List[Image.Image] = []
+                    for idx, page in enumerate(pages):
+                        if idx < len(page_is_back) and page_is_back[idx]:
+                            local_dx = dx
+                            local_dy = dy
+                            # if we're in manual flip mode (no_flip_backs) but this back page belongs to DFC (flipped), invert both axes to compensate
+                            if no_flip_backs and idx < len(page_is_dfc_back) and page_is_dfc_back[idx]:
+                                local_dx = -local_dx
+                                local_dy = -local_dy
+                            new_pages.append(ImageChops.offset(page, local_dx, local_dy))
+                        else:
+                            new_pages.append(page)
+                    pages = new_pages
 
             # Save the pages array as a PDF
             if output_images:
