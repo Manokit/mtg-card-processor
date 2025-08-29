@@ -6,7 +6,7 @@ import time
 from urllib.parse import quote
 from card_selector_gui import CardSelectorGUI
 
-double_sided_layouts = ['transform', 'modal_dfc']
+double_sided_layouts = ['transform', 'modal_dfc', 'reversible_card']
 
 def request_scryfall(
     query: str,
@@ -91,6 +91,18 @@ def fetch_card_art(
                     image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{borderless_tag}{str(counter + 1)}.png')
                     with open(image_path, 'wb') as f:
                         f.write(card_art)
+        elif 'card_faces' in card_json and len(card_json['card_faces']) > 0:
+            # fallback: some layouts (e.g., reversible_card) put images only on faces
+            front_face = card_json['card_faces'][0]
+            if 'image_uris' in front_face and 'png' in front_face['image_uris']:
+                front_image_url = front_face['image_uris']['png']
+                card_art = request_scryfall(front_image_url).content
+                if card_art is not None:
+                    for counter in range(quantity):
+                        borderless_tag = '_borderless' if is_borderless else ''
+                        image_path = os.path.join(front_img_dir, f'{str(index)}{clean_card_name}{borderless_tag}{str(counter + 1)}.png')
+                        with open(image_path, 'wb') as f:
+                            f.write(card_art)
 
         # Get backside of card, if it exists
         if layout in double_sided_layouts:

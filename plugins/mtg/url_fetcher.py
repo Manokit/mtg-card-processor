@@ -1,4 +1,5 @@
 import re
+import json
 import requests
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
@@ -8,8 +9,14 @@ class DeckURLFetcher:
     
     def __init__(self):
         self.session = requests.Session()
+        # be polite and look like a browser to avoid 403 blocks
         self.session.headers.update({
-            'User-Agent': 'MTG-Card-Processor/1.0'
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Origin': 'https://www.moxfield.com',
+            'Referer': 'https://www.moxfield.com/',
+            'Connection': 'keep-alive'
         })
     
     def extract_deck_id_from_url(self, url: str) -> Optional[Dict[str, str]]:
@@ -64,9 +71,10 @@ class DeckURLFetcher:
     def fetch_moxfield_deck(self, deck_id: str) -> Optional[Dict[str, Any]]:
         """Fetch deck data from Moxfield API."""
         try:
-            # Try the public API endpoint used by other tools
+            # try the public api endpoint with a realistic referrer
             url = f"https://api.moxfield.com/v2/decks/all/{deck_id}"
-            response = self.session.get(url)
+            referer = { 'Referer': f'https://www.moxfield.com/decks/{deck_id}' }
+            response = self.session.get(url, headers=referer, timeout=15)
             response.raise_for_status()
             
             data = response.json()
@@ -75,6 +83,62 @@ class DeckURLFetcher:
         except Exception as e:
             print(f"Error fetching Moxfield deck {deck_id}: {e}")
             return None
+
+    def _fetch_moxfield_deck_name_from_page(self, deck_id: str) -> Optional[str]:
+        """Best-effort deck name extraction from the HTML deck page when API blocks us."""
+        try:
+            page_url = f"https://www.moxfield.com/decks/{deck_id}"
+            r = self.session.get(
+                page_url,
+                headers={'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},
+                timeout=15
+            )
+            r.raise_for_status()
+            html = r.text
+
+            # try og:title first
+            og_title = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            if og_title:
+                title = og_title.group(1).strip()
+                # titles are often like "<deck name> - Moxfield"; strip the suffix if present
+                if title.lower().endswith(' - moxfield'):
+                    return title[:-11].strip()
+                return title
+
+            # fallback to <title>
+            m = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
+            if m:
+                title = m.group(1).strip()
+                # normalize common suffix
+                if title.lower().endswith(' - moxfield'):
+                    return title[:-11].strip()
+                return title
+
+            # try to parse next.js data if present
+            next_data = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.DOTALL)
+            if next_data:
+                try:
+                    payload = json.loads(next_data.group(1))
+                    # best-effort walk of likely locations
+                    props = payload.get('props') or {}
+                    page_props = props.get('pageProps') or {}
+                    # check for direct name field
+                    if 'name' in page_props and isinstance(page_props['name'], str):
+                        return page_props['name']
+                    # dehydrated state path used by react-query
+                    dehydrated = page_props.get('dehydratedState') or {}
+                    queries = dehydrated.get('queries') or []
+                    for q in queries:
+                        state = q.get('state') or {}
+                        data = state.get('data') or {}
+                        if isinstance(data, dict) and 'name' in data:
+                            return data.get('name')
+                except Exception:
+                    pass
+
+        except Exception:
+            pass
+        return None
     
     def convert_archidekt_to_deck_format(self, archidekt_data: Dict[str, Any]) -> str:
         """Convert Archidekt API response to deck text format."""
@@ -225,5 +289,11 @@ class DeckURLFetcher:
             data = self.fetch_moxfield_deck(deck_id)
             if data:
                 return data.get('name', f'moxfield_deck_{deck_id}')
+            # fallback: attempt to get the name from the html page
+            page_name = self._fetch_moxfield_deck_name_from_page(deck_id)
+            if page_name:
+                return page_name
+            # final fallback: use deck id as name
+            return f'moxfield_deck_{deck_id}'
         
         return None
