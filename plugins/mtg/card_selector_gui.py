@@ -13,6 +13,14 @@ import pickle
 import hashlib
 import numpy as np
 
+# Import DINOv3 analyzer
+try:
+    from dinov3_analyzer import get_analyzer, is_dinov3_available, DINOv3CardAnalyzer
+    DINOV3_INTEGRATION = True
+except ImportError as e:
+    print(f"Warning: DINOv3 analyzer not available: {e}")
+    DINOV3_INTEGRATION = False
+
 class CardSelectorGUI:
     # class-level persistent cache shared across all instances
     _global_image_cache: Dict[str, Image.Image] = {}
@@ -1603,8 +1611,40 @@ class CardSelectorGUI:
         invert_sel_button = ttk.Button(button_frame, text="Invert", command=self.invert_selection)
         invert_sel_button.grid(row=0, column=3)
         
+        # DINOv3-powered semantic selection buttons
+        if DINOV3_INTEGRATION:
+            semantic_frame = ttk.Frame(selection_frame)
+            semantic_frame.grid(row=6, column=0, sticky=(tk.W, tk.E), pady=(10, 5))
+            
+            # Create semantic selection buttons
+            text_sel_button = ttk.Button(semantic_frame, text="🔤 Smart Text", 
+                                        command=lambda: self.semantic_select(['text_box']))
+            text_sel_button.grid(row=0, column=0, padx=(0, 5))
+            
+            border_sel_button = ttk.Button(semantic_frame, text="🖼️ Smart Borders", 
+                                          command=lambda: self.semantic_select(['border_frame']))
+            border_sel_button.grid(row=0, column=1, padx=(0, 5))
+            
+            art_sel_button = ttk.Button(semantic_frame, text="🎨 Smart Art", 
+                                       command=lambda: self.semantic_select(['art_box']))
+            art_sel_button.grid(row=0, column=2, padx=(0, 5))
+            
+            all_elements_button = ttk.Button(semantic_frame, text="⚡ All Elements", 
+                                            command=lambda: self.semantic_select(['text_box', 'border_frame']))
+            all_elements_button.grid(row=0, column=3)
+            
+            # Status label for DINOv3
+            self.dinov3_status_label = ttk.Label(selection_frame, text="DINOv3 AI selection available", 
+                                               font=("Arial", 8), foreground="green")
+            self.dinov3_status_label.grid(row=7, column=0, sticky=tk.W, pady=(5, 0))
+        else:
+            # Fallback message when DINOv3 is not available
+            fallback_label = ttk.Label(selection_frame, text="Install DINOv3 dependencies for AI selection", 
+                                     font=("Arial", 8), foreground="orange")
+            fallback_label.grid(row=6, column=0, sticky=tk.W, pady=(10, 0))
+        
         # smart fix button (prominent)
-        smart_fix_button = ttk.Button(button_frame, text="🎯 Smart Fix", command=self.smart_fix_card)
+        smart_fix_button = ttk.Button(button_frame, text="🎯 Smart Fix", command=self.enhanced_smart_fix_card)
         smart_fix_button.grid(row=1, column=0, columnspan=4, pady=(10, 0), sticky=(tk.W, tk.E))
         
         # instructions label
@@ -2391,6 +2431,159 @@ class CardSelectorGUI:
             self.is_drawing = False
             self.last_draw_pos = None
         
+    def semantic_select(self, element_types):
+        """use DINOv3 to select specific card elements"""
+        try:
+            if not DINOV3_INTEGRATION:
+                print("DINOv3 not available, using fallback selection")
+                # Fallback to existing methods
+                if 'text_box' in element_types:
+                    self.select_frame()
+                return
+            
+            print(f"🤖 DINOv3 selecting elements: {element_types}")
+            
+            if hasattr(self, 'dinov3_status_label'):
+                self.dinov3_status_label.configure(text="DINOv3 analyzing...", foreground="blue")
+            
+            # Get analyzer instance
+            analyzer = get_analyzer()
+            
+            # Create combined mask for requested elements
+            combined_mask = None
+            
+            if self.original_image:
+                # Process front image
+                print("Analyzing front image with DINOv3...")
+                front_mask = analyzer.create_smart_selection_mask(self.original_image, element_types)
+                combined_mask = front_mask
+                self.selection_mask = front_mask
+            
+            if self.original_image_back:
+                # Process back image
+                print("Analyzing back image with DINOv3...")
+                back_mask = analyzer.create_smart_selection_mask(self.original_image_back, element_types)
+                self.selection_mask_back = back_mask
+            
+            # Update selection mode to show we have an active selection
+            self.selection_mode = 'color'
+            if hasattr(self, 'selection_mode_var'):
+                self.selection_mode_var.set('color')
+            
+            # Refresh display
+            self.refresh_image_display()
+            
+            # Update status
+            element_names = {
+                'text_box': 'Text',
+                'border_frame': 'Borders', 
+                'art_box': 'Artwork',
+                'name_box': 'Name'
+            }
+            selected_names = [element_names.get(elem, elem) for elem in element_types]
+            status_text = f"✅ Selected: {', '.join(selected_names)}"
+            
+            if hasattr(self, 'dinov3_status_label'):
+                self.dinov3_status_label.configure(text=status_text, foreground="green")
+            
+            print(f"✅ DINOv3 selection complete: {', '.join(selected_names)}")
+            
+        except Exception as e:
+            print(f"Error in semantic selection: {e}")
+            if hasattr(self, 'dinov3_status_label'):
+                self.dinov3_status_label.configure(text="DINOv3 error, using fallback", foreground="orange")
+            # Fallback to existing methods
+            if 'text_box' in element_types or 'border_frame' in element_types:
+                self.select_frame()
+
+    def enhanced_smart_fix_card(self):
+        """enhanced Smart Fix using DINOv3 analysis when available"""
+        try:
+            print("🎯 Running Enhanced Smart Fix...")
+            
+            if not self.original_image:
+                print("No image loaded for Smart Fix")
+                return
+            
+            # Try DINOv3-enhanced analysis first
+            if DINOV3_INTEGRATION:
+                try:
+                    print("Using DINOv3 for advanced analysis...")
+                    analyzer = get_analyzer()
+                    
+                    # Get comprehensive analysis
+                    analysis = analyzer.analyze_card_quality(self.original_image)
+                    corrections = analyzer.suggest_optimal_corrections(self.original_image)
+                    
+                    print(f"DINOv3 analysis: {analysis}")
+                    
+                    # Apply DINOv3-suggested corrections
+                    if 'global' in corrections:
+                        global_corrections = corrections['global']
+                        self.set_current_adjustments(
+                            brightness=global_corrections.get('brightness', 1.0),
+                            contrast=global_corrections.get('contrast', 1.0),
+                            saturation=global_corrections.get('saturation', 1.0),
+                            gamma=global_corrections.get('gamma', 1.0),
+                            color_balance=global_corrections.get('color_balance', 0.0)
+                        )
+                    
+                    # Apply semantic masks if suggested
+                    if 'text_areas' in corrections or 'border_areas' in corrections:
+                        print("Applying DINOv3 semantic masks...")
+                        elements_to_select = []
+                        
+                        if 'text_areas' in corrections:
+                            elements_to_select.append('text_box')
+                        if 'border_areas' in corrections:
+                            elements_to_select.append('border_frame')
+                        
+                        if elements_to_select:
+                            # Create semantic selection
+                            smart_mask = analyzer.create_smart_selection_mask(self.original_image, elements_to_select)
+                            self.selection_mask = smart_mask
+                            
+                            # Apply to back image if present
+                            if self.original_image_back:
+                                back_mask = analyzer.create_smart_selection_mask(self.original_image_back, elements_to_select)
+                                self.selection_mask_back = back_mask
+                            
+                            # Update selection mode
+                            self.selection_mode = 'color'
+                            if hasattr(self, 'selection_mode_var'):
+                                self.selection_mode_var.set('color')
+                    
+                    # Update UI
+                    self.update_slider_values()
+                    self.update_all_labels()
+                    self.refresh_image_display()
+                    
+                    # Show results
+                    suggestions = analysis.get('suggested_corrections', [])
+                    if suggestions:
+                        print(f"✅ Enhanced Smart Fix complete! Applied: {', '.join(suggestions)}")
+                        print("💡 DINOv3 provided precise semantic analysis and corrections")
+                    else:
+                        print("✅ DINOv3 analysis: Image quality is good - minimal corrections needed")
+                    
+                    return
+                    
+                except Exception as e:
+                    print(f"DINOv3 analysis failed: {e}")
+                    print("Falling back to traditional Smart Fix...")
+            
+            # Fallback to original Smart Fix
+            print("Using traditional Smart Fix analysis...")
+            self.smart_fix_card()
+            
+        except Exception as e:
+            print(f"Enhanced Smart Fix error: {e}")
+            # Ultimate fallback
+            try:
+                self.smart_fix_card()
+            except Exception as e2:
+                print(f"Fallback Smart Fix also failed: {e2}")
+
     def save_window_position(self):
         """save current window position for next dialog"""
         if self.root:
@@ -2631,4 +2824,4 @@ class CardSelectorGUI:
                 
             if loaded_count < len(self.printings):
                 self.update_display()  # refresh current display
-                self.root.after(500, self.schedule_refresh)  # schedule next refresh 
+                self.root.after(500, self.schedule_refresh)  # schedule next refresh

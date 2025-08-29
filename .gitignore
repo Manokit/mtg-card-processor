@@ -12,3 +12,8 @@ game/*
 images/*.xcf
 
 hugo/public/
+
+.venv*
+
+.vent312/*
+.vent313/*
